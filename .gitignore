@@ -1,0 +1,10 @@
+.venv/
+data/
+node_modules/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.log
+.env
+.vscode/
+.idea/

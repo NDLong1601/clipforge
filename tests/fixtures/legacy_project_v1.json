@@ -1,0 +1,13 @@
+{
+  "id": "1111111111111111",
+  "revision": 3,
+  "name": "Dự án ClipForge bản cũ",
+  "script": "Một câu chuyện ngắn.",
+  "target_duration": 6,
+  "assets": [],
+  "clips": [],
+  "template": {
+    "id": "clean",
+    "name": "Toàn khung"
+  }
+}
