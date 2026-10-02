@@ -297,6 +297,11 @@ def benchmark(output_path: Path) -> dict:
             result = render.render(project, jobs.Job(project.id, "m0-baseline-render"), preview=True)
             render_seconds = round(time.perf_counter() - started, 2)
         render_memory_mb = memory.peak_mb
+        with PeakMemorySampler() as memory:
+            started = time.perf_counter()
+            warm_result = render.render(project, jobs.Job(project.id, "m0-baseline-render-warm"), preview=True)
+            warm_render_seconds = round(time.perf_counter() - started, 2)
+        warm_render_memory_mb = memory.peak_mb
         project_dir = store.project_dir(project.id)
         thumb_dir = project_dir / "thumbs"
         export_dir = project_dir / "exports"
@@ -349,6 +354,12 @@ def benchmark(output_path: Path) -> dict:
                 "render_seconds": render_seconds,
                 "render_peak_process_tree_mb": render_memory_mb,
                 "render_output_bytes": result["size"],
+                "render_encoder": result["encoder"],
+                "render_hardware_encoder": result["hardware_encoder"],
+                "warm_render_seconds": warm_render_seconds,
+                "warm_render_peak_process_tree_mb": warm_render_memory_mb,
+                "warm_clip_cache_hits": warm_result["clip_cache_hits"],
+                "warm_clip_cache_misses": warm_result["clip_cache_misses"],
                 "export_tree_bytes_after_cleanup": _tree_bytes(export_dir),
             },
         }

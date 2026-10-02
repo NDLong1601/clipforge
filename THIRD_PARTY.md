@@ -5,3 +5,7 @@ Giao diện đã build chứa React/React DOM (MIT), biểu tượng Lucide (ISC
 Các gói Python, Vite và phụ thuộc khác được tải qua pip/npm theo giấy phép tương ứng của từng gói. FFmpeg không nằm trong gói ZIP mã nguồn; được cung cấp qua imageio-ffmpeg khi cài đặt. Khi phân phối một bộ cài kèm binary FFmpeg, cần kiểm tra giấy phép của đúng bản binary và codec đi kèm.
 
 Tư liệu trong dự án demo được tạo bằng Pillow/FFmpeg và bộ tổng hợp âm trong `backend/demo.py`, không tải video hay nhạc bên ngoài.
+
+Bộ lọc khuôn mặt dùng mô hình YuNet của OpenCV Zoo (MIT), chạy trên máy, không gửi video lên dịch vụ ngoài.
+Mô hình, giấy phép và commit/SHA-256 nguồn được lưu trong `backend/assets/`.
+Nguồn: https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet.

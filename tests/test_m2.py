@@ -33,7 +33,7 @@ def test_schema_v1_migration_preserves_existing_cues_as_edited(m2_root):
     store.atomic(store.project_dir(project.id) / 'project.json', data)
 
     loaded = store.read(project.id)
-    assert loaded.schema_version == 3
+    assert loaded.schema_version == 5
     assert loaded.cues_edited is True
     assert loaded.cues_stale is False
     assert loaded.cues[0].text == 'Cue cũ.'

@@ -1,4 +1,5 @@
 """Set up ClipForge, start the local server, then open its web interface."""
+
 import argparse
 import hashlib
 import json
@@ -18,16 +19,16 @@ ROOT = Path(__file__).resolve().parent
 
 
 def clipforge_running(port):
-    url = f'http://127.0.0.1:{port}'
+    url = f"http://127.0.0.1:{port}"
     try:
-        with urllib.request.urlopen(url + '/api/health', timeout=1) as response:
+        with urllib.request.urlopen(url + "/api/health", timeout=1) as response:
             info = json.load(response)
-        if info.get('product') == 'clipforge-local':
+        if info.get("product") == "clipforge-local":
             return True
         # Recognize a server started by an older ClipForge release.
-        if info.get('version') == '1.0.0':
+        if info.get("version") == "1.0.0":
             with urllib.request.urlopen(url, timeout=1) as response:
-                return b'ClipForge' in response.read(4096)
+                return b"ClipForge" in response.read(4096)
     except Exception:
         pass
     return False
@@ -35,8 +36,8 @@ def clipforge_running(port):
 
 def port_in_use(port):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as connection:
-        connection.settimeout(.5)
-        return connection.connect_ex(('127.0.0.1', port)) == 0
+        connection.settimeout(0.5)
+        return connection.connect_ex(("127.0.0.1", port)) == 0
 
 
 def choose_port(requested=None):
@@ -50,8 +51,8 @@ def choose_port(requested=None):
         if not port_in_use(port):
             return port, False
     if requested:
-        raise SystemExit(f'Port {requested} is being used by another program.')
-    raise SystemExit('No free port from 8765 to 8785 is available for ClipForge.')
+        raise SystemExit(f"Port {requested} is being used by another program.")
+    raise SystemExit("No free port from 8765 to 8785 is available for ClipForge.")
 
 
 def open_browser(url):
@@ -62,71 +63,133 @@ def open_browser(url):
     if opened:
         return
     try:
-        if os.name == 'nt':
+        if os.name == "nt":
             os.startfile(url)
             return
     except OSError:
         pass
     if not opened:
-        print('Open this URL in your browser: ' + url, flush=True)
+        print("Open this URL in your browser: " + url, flush=True)
 
 
 def main():
-    parser = argparse.ArgumentParser(description='ClipForge Local')
-    parser.add_argument('--port', type=int, metavar='PORT')
-    parser.add_argument('--no-browser', action='store_true')
-    parser.add_argument('--setup-only', action='store_true')
+    parser = argparse.ArgumentParser(description="ClipForge Local")
+    parser.add_argument("--port", type=int, metavar="PORT")
+    parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument("--setup-only", action="store_true")
     args = parser.parse_args()
     if args.port is not None and not 1024 <= args.port <= 65535:
-        raise SystemExit('Port must be between 1024 and 65535.')
+        raise SystemExit("Port must be between 1024 and 65535.")
     if sys.version_info < (3, 12):
-        raise SystemExit('Python 3.12 or newer is required for ClipForge.')
+        raise SystemExit("Python 3.12 or newer is required for ClipForge.")
     os.chdir(ROOT)
-    python = ROOT / '.venv' / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
+    python = (
+        ROOT / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    )
     if not python.exists():
-        print('Creating the local Python environment...', flush=True)
-        venv.EnvBuilder(with_pip=True).create(ROOT / '.venv')
-    stamp = ROOT / '.venv' / '.clipforge-ready'
-    install_file = ROOT / ('requirements-lock.txt' if (ROOT / 'requirements-lock.txt').exists() else 'requirements.txt')
+        print("Creating the local Python environment...", flush=True)
+        venv.EnvBuilder(with_pip=True).create(ROOT / ".venv")
+    stamp = ROOT / ".venv" / ".clipforge-ready"
+    install_file = ROOT / (
+        "requirements-lock.txt"
+        if (ROOT / "requirements-lock.txt").exists()
+        else "requirements.txt"
+    )
     signature = hashlib.sha256(install_file.read_bytes()).hexdigest()
     if not stamp.exists() or stamp.read_text() != signature:
-        print('Installing required packages (this may take a while on first launch)...', flush=True)
-        subprocess.run([str(python), '-m', 'pip', 'install', '-r', str(install_file)], check=True)
+        print(
+            "Installing required packages (this may take a while on first launch)...",
+            flush=True,
+        )
+        install = subprocess.run(
+            [
+                str(python),
+                "-m",
+                "pip",
+                "install",
+                "--quiet",
+                "--progress-bar",
+                "off",
+                "-r",
+                str(install_file),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        if install.returncode:
+            # Keep pip's Rich progress renderer away from the Windows console:
+            # legacy code pages cannot encode Vietnamese paths in its output.
+            detail = install.stdout.decode("utf-8", errors="replace").splitlines()
+            summary = next(
+                (
+                    line
+                    for line in reversed(detail)
+                    if line.startswith(("ERROR:", "error:"))
+                ),
+                "",
+            )
+            if summary:
+                print(
+                    summary.encode("ascii", errors="replace").decode("ascii"),
+                    file=sys.stderr,
+                )
+            raise SystemExit(
+                f"Package installation failed (pip exit code {install.returncode}). "
+                "Check the network and Python version, then run setup again."
+            )
         stamp.write_text(signature)
-    if not (ROOT / 'frontend' / 'dist' / 'index.html').exists():
-        npm = shutil.which('npm.cmd' if os.name == 'nt' else 'npm')
+    if not (ROOT / "frontend" / "dist" / "index.html").exists():
+        npm = shutil.which("npm.cmd" if os.name == "nt" else "npm")
         if not npm:
-            raise SystemExit('Node.js is needed to build the interface. The delivered ZIP includes frontend/dist.')
-        subprocess.run([npm, 'ci'], cwd=ROOT / 'frontend', check=True)
-        subprocess.run([npm, 'run', 'build'], cwd=ROOT / 'frontend', check=True)
+            raise SystemExit(
+                "Node.js is needed to build the interface. The delivered ZIP includes frontend/dist."
+            )
+        subprocess.run([npm, "ci"], cwd=ROOT / "frontend", check=True)
+        subprocess.run([npm, "run", "build"], cwd=ROOT / "frontend", check=True)
     if args.setup_only:
-        print('Setup complete. Double-click MO_CLIPFORGE.bat to open ClipForge.')
+        print("Setup complete. Double-click MO_CLIPFORGE.bat to open ClipForge.")
         return
 
     port, running = choose_port(args.port)
-    url = f'http://127.0.0.1:{port}'
+    url = f"http://127.0.0.1:{port}"
     if running:
-        print('ClipForge is already running: ' + url, flush=True)
+        print("ClipForge is already running: " + url, flush=True)
         if not args.no_browser:
             open_browser(url)
         return
 
     if not args.no_browser:
+
         def open_when_ready():
             for _ in range(60):
                 if clipforge_running(port):
                     open_browser(url)
                     return
                 time.sleep(1)
+
         threading.Thread(target=open_when_ready, daemon=True).start()
-    print('Opening ClipForge at ' + url, flush=True)
-    print('Keep this window open while using ClipForge. Press Ctrl+C to stop.', flush=True)
+    print("Opening ClipForge at " + url, flush=True)
+    print(
+        "Keep this window open while using ClipForge. Press Ctrl+C to stop.", flush=True
+    )
     try:
-        subprocess.run([str(python), '-m', 'uvicorn', 'backend.main:app',
-                        '--host', '127.0.0.1', '--port', str(port)], cwd=ROOT, check=True)
+        subprocess.run(
+            [
+                str(python),
+                "-m",
+                "uvicorn",
+                "backend.main:app",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(port),
+            ],
+            cwd=ROOT,
+            check=True,
+        )
     except KeyboardInterrupt:
         pass
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

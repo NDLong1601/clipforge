@@ -86,9 +86,18 @@ def test_ai_adapters_and_reject_invalid_actions(client,monkeypatch):
     monkeypatch.setattr(planner,'ai_json',lambda *args,**kwargs:{'choices':[{'index':0,'scene_id':p.assets[0].scenes[0].id}]})
     result=planner.plan(p,True,jobs.Job(pid,'test'));assert result.clips[0].scene_id==p.assets[0].scenes[0].id
     store.save(result)
-    r=client.post(f'/api/projects/{pid}/apply-ai',json={'clip_changes':[{'id':p.clips[0].id,'asset_id':'missing'}]})
+    before=store.read(pid)
+    r=client.post(f'/api/projects/{pid}/assistant-preview',json={
+        'revision':before.revision,'clip_changes':[{'id':p.clips[0].id,'asset_id':'missing'}]})
     assert r.status_code==400
-    assert client.post(f'/api/projects/{pid}/apply-ai',json={'music_volume':.2}).json()['music_volume']==.2
+    assert store.read(pid).model_dump()==before.model_dump()
+    preview=client.post(f'/api/projects/{pid}/assistant-preview',json={
+        'revision':before.revision,'music_volume':.2})
+    assert preview.status_code==200 and preview.json()['can_apply']
+    applied=client.post(f'/api/projects/{pid}/apply-ai',json={
+        'revision':before.revision,'music_volume':.2,
+        'preview_token':preview.json()['preview_token']})
+    assert applied.status_code==200 and applied.json()['music_volume']==.2
 
 def test_subtitle_override_has_no_duplicate_overlap(isolated):
     p=Project(clips=[Clip(asset_id='a',duration=3,caption='Mới'),Clip(asset_id='b',duration=3)],cues=[Cue(start=0,end=6,text='Cũ')])
@@ -117,7 +126,14 @@ def test_upload_filename_cannot_escape(client,tmp_path):
     p=client.post('/api/projects',json={}).json()
     r=client.post('/api/projects/'+p['id']+'/assets',files={'files':('../../evil.png',b.getvalue(),'image/png')},data={'role':'overlay'})
     assert r.status_code==200
-    a=r.json()['assets'][0]
+    job=r.json()['job']
+    for _ in range(100):
+        status=client.get('/api/jobs?pid='+p['id']).json()
+        found=next((item for item in status if item['id']==job['id']),None)
+        if found and found['status'] in ('done','error','cancelled'):break
+        time.sleep(.02)
+    assert found['status']=='done',found
+    a=client.get('/api/projects/'+p['id']).json()['assets'][0]
     assert '/' not in a['filename'] and '\\' not in a['filename']
 
 def test_ai_protocol_contract(isolated,monkeypatch):
@@ -191,11 +207,12 @@ def test_ai_fallback_and_manual_switch(isolated,monkeypatch):
     ],'active_ai_profile_id':'one','ai_auto_fallback':True})
     result,route=providers.ai_json('Return JSON',return_route=True)
     assert result['message']=='ok' and route['id']=='two' and route['fallback_used']
-    assert len(seen)==2
+    assert len(seen)==3
     assert json.loads(seen[0].content)['response_format']=={'type':'json_object'}
-    assert 'response_format' not in json.loads(seen[1].content)
-    assert 'generativelanguage.googleapis.com' in str(seen[1].url)
-    assert seen[1].headers['Authorization']=='Bearer fake-two'
+    assert json.loads(seen[1].content)['response_format']=={'type':'json_object'}
+    assert 'response_format' not in json.loads(seen[2].content)
+    assert 'generativelanguage.googleapis.com' in str(seen[2].url)
+    assert seen[2].headers['Authorization']=='Bearer fake-two'
     seen.clear()
     store.save_settings({'active_ai_profile_id':'two'})
     result,route=providers.ai_json('Return JSON',return_route=True)
@@ -204,7 +221,7 @@ def test_ai_fallback_and_manual_switch(isolated,monkeypatch):
     store.save_settings({'active_ai_profile_id':'one','ai_auto_fallback':False})
     with pytest.raises(ValueError,match='HTTP 429'):
         providers.ai_json('Return JSON')
-    assert len(seen)==1
+    assert len(seen)==2
 
 def test_template_inference_contract(isolated,monkeypatch):
     p=make_project();a=p.assets[0]

@@ -1,0 +1,137 @@
+.provider-telemetry {
+  display: block;
+  color: #9ab38a;
+  font-size: 10px;
+  line-height: 1.6;
+  margin: 4px 0 10px;
+}
+
+.canvas-scene {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+
+.proposal-preview .preview-stage {
+  padding: 10px 0;
+}
+
+.proposal-preview .video-canvas {
+  width: 100%;
+  max-width: 260px;
+}
+
+.proposal-preview-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.proposal-choice,
+.proposal-clip {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  border-top: 1px solid #4b613d;
+  padding: 10px 0;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.proposal-choice > input,
+.proposal-clip > input {
+  flex: 0 0 auto;
+  margin-top: 3px;
+  accent-color: #b5f36d;
+}
+
+.proposal-choice > span,
+.proposal-clip-content {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  flex: 1;
+}
+
+.proposal-choice blockquote {
+  margin: 3px 0;
+  border-left: 2px solid #a4d97b;
+  padding-left: 9px;
+  color: #cdddc2;
+}
+
+.proposal-compare {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 7px;
+}
+
+.proposal-compare > span {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.proposal-compare small,
+.proposal-clip-content > small {
+  color: #91a385;
+  font-size: 9px;
+}
+
+.proposal-compare img {
+  width: 100%;
+  height: 76px;
+  object-fit: cover;
+  border-radius: 4px;
+  background: #151b13;
+}
+
+.proposal-compare em {
+  overflow-wrap: anywhere;
+  color: #d0ddc5;
+  font-size: 10px;
+  font-style: normal;
+}
+
+.proposal-review {
+  border-top: 1px solid #4b613d;
+  margin-top: 8px;
+  padding-top: 10px;
+}
+
+.proposal-issue {
+  font-size: 10px;
+  line-height: 1.6;
+}
+
+.proposal-issue.error {
+  color: #ffb9a5;
+}
+
+.proposal-issue.warning {
+  color: #e5d99a;
+}
+
+.proposal-issue small {
+  display: block;
+  color: #9eae91;
+}
+
+.export-item-main {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+}
+
+.export-item-main > small {
+  color: #84977a;
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+@media (max-width: 850px) {
+  .workspace,
+  .workspace.collapsed {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

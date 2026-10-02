@@ -86,9 +86,9 @@ def test_old_project_data_migrates_to_current_schema(isolated_store):
     store.atomic(path, data)
 
     loaded = store.read(project.id)
-    assert loaded.schema_version == 3
-    assert store.save(loaded).schema_version == 3
-    assert json.loads(path.read_text(encoding='utf-8'))['schema_version'] == 3
+    assert loaded.schema_version == 5
+    assert store.save(loaded).schema_version == 5
+    assert json.loads(path.read_text(encoding='utf-8'))['schema_version'] == 5
 
 
 def test_broken_project_isolated_and_recovered_from_history(client, isolated_store):

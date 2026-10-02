@@ -8,3 +8,8 @@ __pycache__/
 .env
 .vscode/
 .idea/
+release/
+review/
+.playwright-mcp/
+review/audio_workflow/*-data/
+review/audio_workflow/*.wav

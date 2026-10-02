@@ -78,7 +78,7 @@ def test_legacy_video_music_and_stale_shape_layer_migrate_save_and_render(review
     _write_legacy(project, raw_path, 2)
 
     loaded = store.read(project.id)
-    assert loaded.schema_version == 3
+    assert loaded.schema_version == 5
     assert store.get_asset(loaded, loaded.music_id).media == 'video'
     assert store.get_asset(loaded, loaded.music_id).has_audio is True
     assert loaded.template.layers[0].asset_id == ''
@@ -100,7 +100,7 @@ def test_recovery_migrates_legacy_history_with_video_music_and_stale_layer(revie
     current.write_bytes(b'{ broken current file')
 
     restored = store.recover(project.id)
-    assert restored.schema_version == 3
+    assert restored.schema_version == 5
     assert restored.music_id == project.music_id
     assert store.get_asset(restored, restored.music_id).media == 'video'
     assert restored.template.layers[0].asset_id == ''
@@ -127,7 +127,7 @@ def test_schema_backup_preserves_exact_original_media_and_restore_instructions(r
 
     migrated = store.read(project.id)
     store.save(migrated)
-    backup_root = next((store.project_dir(project.id) / 'backups').glob('schema-v0-to-v3-*'))
+    backup_root = next((store.project_dir(project.id) / 'backups').glob('schema-v0-to-v5-*'))
     assert (backup_root / 'project.json').read_bytes() == raw
     assert (backup_root / 'assets' / 'source.mp4').read_bytes() == b'legacy media bytes'
     manifest = json.loads((backup_root / 'manifest.json').read_text(encoding='utf-8'))
@@ -176,7 +176,7 @@ def test_interrupted_upgrade_keeps_original_project_and_completed_backup(review_
         store.save(migrated)
 
     assert path.read_bytes() == raw
-    backup_root = next((path.parent / 'backups').glob('schema-v0-to-v3-*'))
+    backup_root = next((path.parent / 'backups').glob('schema-v0-to-v5-*'))
     assert (backup_root / 'project.json').read_bytes() == raw
     assert store.schema_backup_info(project.id)['available'] is True
 
@@ -192,7 +192,7 @@ def test_schema_backup_survives_history_pruning_after_many_saves(review_root):
         project = store.save(project)
 
     assert len(list((path.parent / 'history').glob('*.json'))) <= 25
-    backup_root = next((path.parent / 'backups').glob('schema-v0-to-v3-*'))
+    backup_root = next((path.parent / 'backups').glob('schema-v0-to-v5-*'))
     assert (backup_root / 'project.json').read_bytes() == raw
     assert store.schema_backup_info(project.id)['available'] is True
 
@@ -207,7 +207,7 @@ def test_schema_backup_keeps_distinct_originals_of_the_same_legacy_version(revie
     second_raw = _write_legacy(project, path, 0)
     store.save(store.read(project.id))
 
-    backups = list((path.parent / 'backups').glob('schema-v0-to-v3-*'))
+    backups = list((path.parent / 'backups').glob('schema-v0-to-v5-*'))
     assert len(backups) == 2
     preserved = {(backup / 'project.json').read_bytes() for backup in backups}
     assert preserved == {first_raw, second_raw}
