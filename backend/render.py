@@ -4,6 +4,8 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 from .store import project_dir, get_asset, asset_path, now
 from . import store
+from . import job_store
+from . import media
 from .models import Cue
 from .media import run_ff, dimensions, probe, proxy_for_preview, ffmpeg
 from .planner import validate_timeline, caption_groups
@@ -19,7 +21,174 @@ from .timeline_math import (
 from .template_content import layer_text
 from . import sound_effects
 
-RENDER_VERSION = "render-v5-frame-clock"
+RENDER_VERSION = "render-v7-validated-inputs"
+RENDER_MANIFEST_VERSION = 1
+
+
+def _render_manifest_path(job):
+    return store.ROOT / "job_runs" / job.id / "render-manifest.json"
+
+
+def _load_render_manifest(job, input_fingerprint):
+    path = _render_manifest_path(job)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if (
+            not isinstance(data, dict)
+            or data.get("schema_version") != RENDER_MANIFEST_VERSION
+            or data.get("job_id") != job.id
+            or data.get("input_fingerprint") != input_fingerprint
+            or not isinstance(data.get("steps"), dict)
+        ):
+            raise ValueError("Invalid render manifest")
+        return data
+    except (OSError, ValueError, TypeError):
+        return {
+            "schema_version": RENDER_MANIFEST_VERSION,
+            "job_id": job.id,
+            "input_fingerprint": input_fingerprint,
+            "created_at": now(),
+            "updated_at": now(),
+            "steps": {},
+        }
+
+
+def _save_render_manifest(job, manifest):
+    manifest["updated_at"] = now()
+    store.atomic(_render_manifest_path(job), manifest)
+    job.steps = [
+        {
+            "id": step_id,
+            "status": entry.get("status", "invalid"),
+            "fingerprint": entry.get("fingerprint", ""),
+            "artifacts": entry.get("artifacts", []),
+            "completed_at": entry.get("completed_at", ""),
+        }
+        for step_id, entry in manifest.get("steps", {}).items()
+    ]
+    job.updated_at = now()
+    job.state_version += 1
+    from . import jobs
+
+    jobs._persist(job)
+
+
+def _render_step_fingerprint(job, step_id, dependencies):
+    return job_store.fingerprint(
+        {
+            "input": job.input_fingerprint,
+            "config": job.config_fingerprint,
+            "render_version": RENDER_VERSION,
+            "step": step_id,
+            "dependencies": dependencies,
+        }
+    )
+
+
+def _artifact_identity(path, base):
+    resolved = Path(path).resolve()
+    root = Path(base).resolve()
+    if resolved == root or root not in resolved.parents:
+        raise ValueError("Checkpoint render nằm ngoài thư mục artifact cho phép")
+    digest = hashlib.sha256()
+    with resolved.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return {
+        "path": resolved.relative_to(root).as_posix(),
+        "sha256": digest.hexdigest(),
+        "size": resolved.stat().st_size,
+    }
+
+
+def _checkpoint_valid(entry, fingerprint, directory, validator=None):
+    if not isinstance(entry, dict) or entry.get("status") != "done" or entry.get("fingerprint") != fingerprint:
+        return False
+    artifacts = entry.get("artifacts")
+    if not isinstance(artifacts, list) or validator and not artifacts:
+        return False
+    try:
+        for artifact in artifacts:
+            relative = Path(str(artifact["path"]))
+            if relative.is_absolute():
+                return False
+            target = (store.ROOT / relative).resolve()
+            allowed_roots = [Path(directory).resolve(), (store.ROOT / "cache").resolve()]
+            if not any(target != base and base in target.parents for base in allowed_roots) or not target.is_file():
+                return False
+            if target.stat().st_size != artifact.get("size"):
+                return False
+            if _artifact_identity(target, store.ROOT).get("sha256") != artifact.get("sha256"):
+                return False
+            if validator and not validator(target):
+                return False
+        return True
+    except Exception:
+        return False
+
+
+def _record_checkpoint(job, manifest, step_id, fingerprint, paths, directory, validation=None):
+    artifacts = [_artifact_identity(path, store.ROOT) for path in paths]
+    manifest["steps"][step_id] = {
+        "status": "done",
+        "fingerprint": fingerprint,
+        "artifacts": artifacts,
+        "validation": validation or {},
+        "completed_at": now(),
+        "dependency_fingerprint": manifest.get("dependency_fingerprint"),
+    }
+    job.resume_capability = "checkpointed"
+    _save_render_manifest(job, manifest)
+
+
+def resume_plan(job):
+    """Report artifact candidates only; render rechecks each one before reuse."""
+    manifest = _load_render_manifest(job, job.input_fingerprint)
+    directory = project_dir(job.pid) / "exports" / job.id
+    candidates = []
+    invalid = []
+    dependency = None
+    try:
+        from .models import Project
+        project = Project.model_validate(job_store.load_snapshot(store.ROOT, job.snapshot_ref))
+        project = _frame_project(project)
+        sound_effects.refresh(project)
+        # Detail/recovery never launches native capability probes or encodes.
+        if _VIDEO_ENCODER is not None:
+            dependency = _final_dependency_fingerprint(project, job, bool(job.payload.get("preview")),
+                _VIDEO_ENCODER, media._AUDIO_ENCODER_CACHE.get(media.ffmpeg()))
+    except (OSError, ValueError, TypeError):
+        pass
+    for step_id, entry in manifest.get("steps", {}).items():
+        valid = bool(dependency and isinstance(entry, dict) and entry.get("dependency_fingerprint") == dependency) and _checkpoint_valid(
+            entry, entry.get("fingerprint") if isinstance(entry, dict) else None,
+            directory,
+        )
+        (candidates if valid else invalid).append(step_id)
+    return {
+        "reusable_candidates": candidates,
+        "missing_or_changed": invalid,
+        "revalidate_before_reuse": True,
+        "ai_calls_possible": False,
+    }
+
+
+def _final_dependency_fingerprint(project, job, preview, encoder, audio_codec):
+    from . import job_inputs
+    layers = [layer for index, clip in enumerate(project.clips) for layer in _layer_list(project, clip, index)]
+    return _render_step_fingerprint(job, "final-dependencies", {
+        "project": project.model_dump(exclude={"exports", "warnings", "updated_at", "created_at", "job_commit_tokens"}),
+        "media": job_inputs.media_identity(project),
+        "fonts": _font_signature(layers, project.template.caption.font_family),
+        "preview": preview, "encoder": list(encoder),
+        "encode_options": _video_encode_options(preview, encoder),
+        "audio_codec": audio_codec, "audio_normalization": "48000-stereo-pcm-v1",
+        "ffmpeg_sha256": media.file_sha256(ffmpeg()), "sound_effect_version": sound_effects.VERSION,
+    })
+
+
+def _mux_fingerprint(job, dependency, duration):
+    return _render_step_fingerprint(job, "mux", {"final_dependencies": dependency, "duration": duration})
 
 
 def _frame_project(project):
@@ -52,6 +221,10 @@ _ENCODER_LOCK = threading.Lock()
 _VIDEO_ENCODER = None
 
 
+def _file_sha256(path):
+    return media.file_sha256(path)
+
+
 def video_encoder():
     """Enable hardware encoding only after a real encode succeeds on this machine."""
     global _VIDEO_ENCODER
@@ -69,7 +242,8 @@ def video_encoder():
         selected = ("libx264", False, [])
         for encoder, flags in options.items():
             try:
-                result = subprocess.run(
+                from . import processes
+                result = processes.run(
                     [
                         executable,
                         "-hide_banner",
@@ -144,29 +318,37 @@ def _hardware_encoder_error(exc):
 def _run_video_encode(args, output, preview, encoder, cwd, job):
     """Retry a hardware-device failure once on CPU, retaining the chosen encoder."""
     global _VIDEO_ENCODER
+    target = Path(output)
+    if not target.is_absolute():
+        target = Path(cwd) / target
+    temporary = target.with_name(f".{target.stem}.{getattr(job, 'id', 'render')}.part{target.suffix}")
+    temporary.unlink(missing_ok=True)
     try:
-        run_ff(
-            [*args, *_video_encode_options(preview, encoder), output], cwd=cwd, job=job
-        )
-    except ValueError as exc:
-        if job:
-            job.check()
-        if not encoder[1] or not _hardware_encoder_error(exc):
-            raise
-        target = Path(output)
-        if not target.is_absolute():
-            target = Path(cwd) / target
-        target.unlink(missing_ok=True)
-        encoder[:] = ["libx264", False, []]
-        with _ENCODER_LOCK:
-            _VIDEO_ENCODER = tuple(encoder)
-        if job:
-            job.update(
-                job.progress, "Encoder phần cứng không khả dụng; tiếp tục bằng CPU"
+        try:
+            run_ff(
+                [*args, *_video_encode_options(preview, encoder), temporary], cwd=cwd, job=job
             )
-        run_ff(
-            [*args, *_video_encode_options(preview, encoder), output], cwd=cwd, job=job
-        )
+        except ValueError as exc:
+            if job:
+                job.check()
+            if not encoder[1] or not _hardware_encoder_error(exc):
+                raise
+            temporary.unlink(missing_ok=True)
+            encoder[:] = ["libx264", False, []]
+            with _ENCODER_LOCK:
+                _VIDEO_ENCODER = tuple(encoder)
+            if job:
+                job.cpu_fallback()
+                job.update(job.progress, "Encoder phần cứng không khả dụng; tiếp tục bằng CPU")
+            run_ff(
+                [*args, *_video_encode_options(preview, encoder), temporary], cwd=cwd, job=job
+            )
+        if not temporary.is_file() or temporary.stat().st_size <= 0:
+            raise ValueError("FFmpeg không tạo được artifact hình hợp lệ")
+        os.replace(temporary, target)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def _font_signature(layers, caption_family):
@@ -175,18 +357,19 @@ def _font_signature(layers, caption_family):
         layer.font_family for layer in layers if layer.kind == "text"
     }
     for family in sorted(families):
-        path, actual, found = resolve(family)
-        stat = path.stat() if path and path.is_file() else None
-        signatures.append(
-            {
+        for bold in (False, True):
+            path, actual, found = resolve(family, bold=bold)
+            stat = path.stat() if path and path.is_file() else None
+            signatures.append({
                 "requested": family,
+                "bold": bold,
                 "resolved": actual,
                 "found": found,
                 "path": str(path) if path else "",
                 "size": stat.st_size if stat else 0,
                 "mtime": stat.st_mtime_ns if stat else 0,
-            }
-        )
+                "sha256": media.file_sha256(path) if stat else "",
+            })
     return signatures
 
 
@@ -365,7 +548,7 @@ def _asset_file_signature(p, asset_ids):
             identity = (stat.st_size, stat.st_mtime_ns)
         except OSError:
             identity = (0, 0)
-        values.append((asset.id, asset.filename, *identity))
+        values.append((asset.id, asset.filename, *identity, _file_sha256(path) if path.is_file() else "missing"))
     return values
 
 
@@ -392,7 +575,13 @@ def _clip_cache_path(
     ]
     payload = {
         "version": RENDER_VERSION,
-        "asset": (asset.id, asset.filename, stat.st_size, stat.st_mtime_ns),
+        "asset": (
+            asset.id,
+            asset.filename,
+            stat.st_size,
+            stat.st_mtime_ns,
+            _file_sha256(original),
+        ),
         "source_text_mode": p.source_text_mode,
         "source_text_regions": [
             region.model_dump() for region in source_text_regions(clip, asset)
@@ -412,6 +601,7 @@ def _clip_cache_path(
         "fonts": _font_signature(layers, "Arial"),
         "preview": preview,
         "encoder": encoder[0],
+        "encode_options": _video_encode_options(preview, encoder),
         "proxy": str(source) != str(original),
     }
     key = hashlib.sha256(
@@ -832,10 +1022,12 @@ def _source_audio_track(p, d, job, duration):
     return output
 
 
-def _validate_audio_clock(path, duration):
+def _validate_audio_clock(path, duration, audio_codec="aac"):
     with av.open(str(path)) as container:
         pts = [packet.pts for packet in container.demux(audio=0) if packet.size]
-    expected = math.ceil(round(duration * 48000) / 1024) + 1
+    expected = math.ceil(round(duration * 48000) / 1024)
+    if audio_codec != "aac_mf":
+        expected += 1
     if (
         len(pts) != expected
         or any(value is None for value in pts)
@@ -858,8 +1050,51 @@ def _validate_video_clock(path, duration):
         raise ValueError("Số khung hình xuất không khớp timeline. Hãy thử xuất lại.")
 
 
+def _validate_video_artifact(path, duration, width=None, height=None):
+    info = probe(path)
+    if info.get("media") != "video" or abs(info.get("duration", 0) - duration) > 0.08:
+        return False
+    if width and info.get("width") != width:
+        return False
+    if height and info.get("height") != height:
+        return False
+    try:
+        _validate_video_clock(path, duration)
+        with av.open(str(path)) as container:
+            stream = container.streams.video[0]
+            return stream.frames == round(duration * 30) and stream.average_rate == 30
+    except Exception:
+        return False
+
+
+def _validate_audio_artifact(path, duration, audio_codec="aac"):
+    try:
+        info = probe(path)
+        if not info.get("has_audio") or abs(info.get("duration", 0) - duration) > 0.12:
+            return False
+        _validate_audio_clock(path, duration, audio_codec)
+        return True
+    except Exception:
+        return False
+
+
+def _validate_audio_track(path, duration):
+    try:
+        info = probe(path)
+        if not info.get("has_audio") or abs(info.get("duration", 0) - duration) > 0.12:
+            return False
+        with av.open(str(path)) as container:
+            stream = container.streams.audio[0]
+            next(container.decode(audio=0), None)
+            return bool(stream.sample_rate == 48000)
+    except Exception:
+        return False
+
+
 def render(p, job, preview=False):
+    job.start_step("preflight")
     original_project = p.model_copy(deep=True)
+    audio_codec = media.audio_encoder()
     report = preflight(p, project_dir(p.id))
     errors = [issue for issue in report["issues"] if issue["severity"] == "error"]
     if errors:
@@ -873,19 +1108,65 @@ def render(p, job, preview=False):
     duration = round(timeline_duration(p.clips) * 30) / 30
     d = project_dir(p.id) / "exports" / job.id
     d.mkdir(parents=True, exist_ok=True)
+    manifest = _load_render_manifest(job, job.input_fingerprint)
+    manifest.setdefault("config_fingerprint", job.config_fingerprint)
+    manifest["last_config_fingerprint"] = job.config_fingerprint
+    output = "preview.mp4" if preview else "video.mp4"
     width, height = dimensions(p.aspect, "720" if preview else p.resolution)
+    encoder = list(video_encoder())
+    configured_encoder = tuple(encoder)
+    dependency = _final_dependency_fingerprint(p, job, preview, encoder, audio_codec)
+    manifest["dependency_fingerprint"] = dependency
+    completed = manifest["steps"].get("mux")
+    if isinstance(completed, dict):
+        validation = completed.get("validation", {})
+        if not isinstance(validation, dict):
+            validation = {}
+        completed_duration = validation.get("duration", duration)
+        if (
+            completed_duration == duration
+            and _checkpoint_valid(
+                completed,
+                _mux_fingerprint(job, dependency, duration),
+                d,
+                lambda path: _validate_video_artifact(
+                    path, duration, width, height
+                ) and _validate_audio_artifact(path, duration, audio_codec),
+            )
+        ):
+            cached_result = manifest.get("result")
+            expected = {"id": job.id, "filename": output, "duration": round(duration, 2), "width": width, "height": height,
+                "preview": preview, "render_version": RENDER_VERSION, "fps": 30, "clock_verified": True,
+                "audio_encoder": audio_codec, "source_revision": original_project.content_revision,
+                "dependency_fingerprint": dependency, "size": (d / output).stat().st_size}
+            if isinstance(cached_result, dict) and all(cached_result.get(key) == value for key, value in expected.items()):
+                snapshot = original_project.model_dump()
+                store.atomic(d / "project.json", snapshot)
+                return cached_result
     fps = 30
     vp = p.template.viewport
     vw = max(2, int(width * vp.w) // 2 * 2)
     vh = max(2, int(height * vp.h) // 2 * 2)
     vx = min(width - vw, round(width * vp.x))
     vy = min(height - vh, round(height * vp.y))
-    encoder = list(video_encoder())
     initial_encoder = encoder[0]
+    preflight_fingerprint = _render_step_fingerprint(
+        job, "preflight", {"project_revision": original_project.revision, "issues": report["issues"]}
+    )
+    manifest["steps"]["preflight"] = {
+        "status": "done",
+        "fingerprint": preflight_fingerprint,
+        "artifacts": [],
+        "validation": {"ok": True, "render_version": RENDER_VERSION},
+        "completed_at": now(),
+        "dependency_fingerprint": dependency,
+    }
+    _save_render_manifest(job, manifest)
     cache_hits = 0
     proxy_count = 0
     for index, clip in enumerate(p.clips):
         job.update(5 + 65 * index / len(p.clips), f"Dựng cảnh {index+1}/{len(p.clips)}")
+        job.start_step(f"clip:{index:03d}")
         asset = get_asset(p, clip.asset_id)
         source = asset_path(p.id, asset)
         if preview and asset.media == "video":
@@ -893,31 +1174,144 @@ def render(p, job, preview=False):
             if str(proxy) != str(source):
                 proxy_count += 1
                 source = proxy
+                proxy_step = f"proxy:{asset.id}"
+                proxy_fingerprint = _render_step_fingerprint(
+                    job,
+                    proxy_step,
+                    {"source_sha256": media.file_sha256(asset_path(p.id, asset)), "proxy_version": 2},
+                )
+                proxy_info = probe(proxy)
+                if (
+                    proxy_info.get("media") != "video"
+                    or abs(proxy_info.get("duration", 0) - asset.duration) > 0.12
+                ):
+                    raise ValueError(f"Proxy preview không hợp lệ: {asset.name}")
+                proxy_entry = manifest["steps"].get(proxy_step)
+                if not _checkpoint_valid(
+                    proxy_entry,
+                    proxy_fingerprint,
+                    d,
+                    lambda path, duration=asset.duration: (
+                        probe(path).get("media") == "video"
+                        and abs(probe(path).get("duration", 0) - duration) <= 0.12
+                    ),
+                ):
+                    _record_checkpoint(
+                        job,
+                        manifest,
+                        proxy_step,
+                        proxy_fingerprint,
+                        [proxy],
+                        d,
+                        {"asset_id": asset.id, "duration": asset.duration, "validated": True},
+                    )
         layers = _layer_list(p, clip, index)
-        _, hit = _render_clip(
-            p,
-            clip,
-            asset,
-            index,
-            layers,
-            source,
-            d,
-            width,
-            height,
-            vw,
-            vh,
-            vx,
-            vy,
-            preview,
-            encoder,
-            job,
+        key, _ = _clip_cache_path(
+            p, clip, asset, index, layers, source, width, height, vw, vh,
+            vx, vy, preview, encoder,
         )
+        step_id = f"clip:{index:03d}"
+        clip_fingerprint = _render_step_fingerprint(
+            job, step_id, {"clip_cache_key": key}
+        )
+        output_path = d / f"clip_{index:03d}.mp4"
+        validate_clip = lambda path, clip=clip: _validate_video_artifact(
+            path, clip.duration, width, height
+        )
+        entry = manifest["steps"].get(step_id)
+        if _checkpoint_valid(entry, clip_fingerprint, d, validate_clip):
+            hit = True
+        else:
+            output_path, hit = _render_clip(
+                p, clip, asset, index, layers, source, d, width, height, vw,
+                vh, vx, vy, preview, encoder, job,
+            )
+            actual_key, _ = _clip_cache_path(
+                p, clip, asset, index, layers, source, width, height, vw, vh,
+                vx, vy, preview, encoder,
+            )
+            clip_fingerprint = _render_step_fingerprint(
+                job, step_id, {"clip_cache_key": actual_key}
+            )
+            if not validate_clip(output_path):
+                output_path.unlink(missing_ok=True)
+                raise ValueError(f"Checkpoint clip {index + 1} không vượt qua kiểm tra hình")
+            _record_checkpoint(
+                job,
+                manifest,
+                step_id,
+                clip_fingerprint,
+                [output_path],
+                d,
+                {"duration": clip.duration, "width": width, "height": height, "fps": 30},
+            )
         cache_hits += int(hit)
     job.update(74, "Ghép cảnh trên trục thời gian chung")
-    _join_video(p, d, job, duration, encoder, preview)
-    source_track = _source_audio_track(p, d, job, duration)
+    job.start_step("join-video")
+    clip_hashes = [
+        manifest["steps"][f"clip:{index:03d}"]["artifacts"][0]["sha256"]
+        for index in range(len(p.clips))
+    ]
+    join_fingerprint = _render_step_fingerprint(
+        job,
+        "join-video",
+        {"clip_hashes": clip_hashes, "duration": duration, "transitions": [
+            (clip.transition, clip.transition_duration) for clip in p.clips
+        ]},
+    )
+    join_validator = lambda path: _validate_video_artifact(path, duration, width, height)
+    joined_path = d / "joined.mp4"
+    if not _checkpoint_valid(manifest["steps"].get("join-video"), join_fingerprint, d, join_validator):
+        _join_video(p, d, job, duration, encoder, preview)
+        if not join_validator(joined_path):
+            joined_path.unlink(missing_ok=True)
+            raise ValueError("Video đã ghép không vượt qua kiểm tra hình")
+        _record_checkpoint(
+            job, manifest, "join-video", join_fingerprint, [joined_path], d,
+            {"duration": duration, "width": width, "height": height, "fps": 30},
+        )
+    track_fingerprint = _render_step_fingerprint(
+        job,
+        "source-audio",
+        {"source_volume": p.source_volume, "clip_hashes": clip_hashes,
+            "sources": _asset_file_signature(p, [clip.asset_id for clip in p.clips]),
+            "clips": [clip.model_dump() for clip in p.clips]},
+    )
+    source_track_path = d / "source_track.wav"
+    source_track = None
+    if p.source_volume > 0:
+        job.start_step("source-audio")
+        track_entry = manifest["steps"].get("source-audio")
+        if _checkpoint_valid(track_entry, track_fingerprint, d, lambda path: _validate_audio_track(path, duration)):
+            source_track = source_track_path
+        else:
+            source_track = _source_audio_track(p, d, job, duration)
+            if not _validate_audio_track(source_track, duration):
+                source_track.unlink(missing_ok=True)
+                raise ValueError("Âm thanh nguồn không vượt qua kiểm tra checkpoint")
+            _record_checkpoint(
+                job, manifest, "source-audio", track_fingerprint, [source_track], d,
+                {"duration": duration, "sample_rate": 48000},
+            )
+    else:
+        manifest["steps"]["source-audio"] = {
+            "status": "done", "fingerprint": track_fingerprint, "artifacts": [],
+            "validation": {"skipped": True}, "completed_at": now(),
+            "dependency_fingerprint": dependency,
+        }
+        _save_render_manifest(job, manifest)
     job.update(80, "Tạo phụ đề và trộn âm thanh")
+    job.start_step("subtitles")
     subtitles(p, width, height, d)
+    caption_paths = [path for path in (d / "captions.srt", d / "captions.ass") if path.is_file()]
+    captions_fingerprint = _render_step_fingerprint(
+        job, "subtitles", {"style": p.template.caption.model_dump(), "cues": [cue.model_dump() for cue in p.cues],
+            "clips": [clip.model_dump() for clip in p.clips], "fonts": _font_signature([], p.template.caption.font_family)}
+    )
+    _record_checkpoint(
+        job, manifest, "subtitles", captions_fingerprint, caption_paths, d,
+        {"caption_count": len(caption_paths)},
+    )
     # Encode audio independently: demuxing concatenated H.264 and WAV in the same
     # filter graph can duplicate AAC packets even with a sample-based audio clock.
     args = []
@@ -985,12 +1379,24 @@ def render(p, job, preview=False):
     if effect_index is not None:
         mix_inputs.append("[effects]")
     if mix_inputs:
-        # Rebuild the AAC clock from the actual sample count after resampling/mixing.
-        filters.append(
-            "".join(mix_inputs)
-            + f"amix=inputs={len(mix_inputs)}:duration=longest:normalize=0,{limiter},"
-            f"atrim=end_sample={round(duration*48000)},asettb=1/48000,asetpts=N[audio]"
-        )
+        sample_count = round(duration * 48000)
+        voice_needs_limiter = voice_index is not None and p.voice_volume > 1
+        if len(mix_inputs) == 1 and not voice_needs_limiter:
+            # Single tracks already have bounded gain (voice <= 1 here); avoid
+            # the lookahead limiter, which can run pathologically slowly on long
+            # mono effect tracks. Keep 0.45 dB of AAC headroom and rebuild the
+            # sample clock directly from the source track.
+            filters.append(
+                "".join(mix_inputs)
+                + f"volume=0.95,atrim=end_sample={sample_count},asettb=1/48000,asetpts=N[audio]"
+            )
+        else:
+            # Rebuild the AAC clock from the actual sample count after mixing.
+            filters.append(
+                "".join(mix_inputs)
+                + f"amix=inputs={len(mix_inputs)}:duration=longest:normalize=0,{limiter},"
+                f"atrim=end_sample={sample_count},asettb=1/48000,asetpts=N[audio]"
+            )
     else:
         args += ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"]
         filters.append(
@@ -1000,6 +1406,9 @@ def render(p, job, preview=False):
         p.template.caption.enabled and (p.cues or any(clip.caption for clip in p.clips))
     )
     output = "preview.mp4" if preview else "video.mp4"
+    audio_path = d / "audio.m4a"
+    audio_temporary = d / f".audio.{job.id}.part.m4a"
+    audio_temporary.unlink(missing_ok=True)
     args += [
         "-filter_complex_threads",
         "1",
@@ -1007,17 +1416,53 @@ def render(p, job, preview=False):
         ";".join(filters),
         "-map",
         "[audio]",
-        "-t",
-        duration,
         "-c:a",
-        "aac",
+        audio_codec,
         "-b:a",
         "192k",
         "-ar",
         "48000",
-        "audio.m4a",
+        audio_temporary,
     ]
-    run_ff(args, cwd=d, job=job)
+    if audio_codec != "aac_mf":
+        args[-1:-1] = ["-t", duration]
+    source_track_hash = (
+        manifest["steps"].get("source-audio", {}).get("artifacts", [{}])[0].get("sha256")
+        if source_track else None
+    )
+    voice_path = asset_path(p.id, get_asset(p, p.voice_id)) if voice_active else None
+    music_path = asset_path(p.id, get_asset(p, p.music_id)) if music_active else None
+    effects_path = sound_effects.track_path(p) if effects_active else None
+    audio_fingerprint = _render_step_fingerprint(
+        job,
+        "mix-audio",
+        {
+            "source_track_hash": source_track_hash,
+            "voice_sha256": media.file_sha256(voice_path) if voice_path else None,
+            "music_sha256": media.file_sha256(music_path) if music_path else None,
+            "effects_sha256": media.file_sha256(effects_path) if effects_path else None,
+            "voice_volume": p.voice_volume,
+            "music_volume": p.music_volume,
+            "source_volume": p.source_volume,
+            "sound_effect_volume": p.sound_effect_volume,
+            "sound_effects": [item.model_dump() for item in p.sound_effects],
+            "ducking": p.ducking,
+            "duration": duration,
+            "audio_codec": audio_codec,
+        },
+    )
+    audio_validator = lambda path: _validate_audio_artifact(path, duration, audio_codec)
+    if not _checkpoint_valid(manifest["steps"].get("mix-audio"), audio_fingerprint, d, audio_validator):
+        job.start_step("mix-audio")
+        run_ff(args, cwd=d, job=job)
+        if not audio_validator(audio_temporary):
+            audio_temporary.unlink(missing_ok=True)
+            raise ValueError("Âm thanh trộn không vượt qua kiểm tra checkpoint")
+        os.replace(audio_temporary, audio_path)
+        _record_checkpoint(
+            job, manifest, "mix-audio", audio_fingerprint, [audio_path], d,
+            {"duration": duration, "sample_rate": 48000},
+        )
     job.update(88, "Xuất hình và phụ đề")
     video_args = [
         "-i",
@@ -1040,58 +1485,90 @@ def render(p, job, preview=False):
         "-movflags",
         "+faststart",
     ]
-    _run_video_encode(video_args, "final_video.mp4", preview, encoder, d, job)
-    job.update(96, "Ghép hình và âm thanh")
-    run_ff(
-        [
-            "-i",
-            "final_video.mp4",
-            "-i",
-            "audio.m4a",
-            "-map",
-            "0:v:0",
-            "-map",
-            "1:a:0",
-            "-c",
-            "copy",
-            "-t",
-            duration,
-            "-movflags",
-            "+faststart",
-            output,
-        ],
-        cwd=d,
-        job=job,
+    video_fingerprint = _render_step_fingerprint(
+        job,
+        "encode-video",
+        {
+            "joined_hash": manifest["steps"]["join-video"]["artifacts"][0]["sha256"],
+            "caption_hashes": [item["sha256"] for item in manifest["steps"]["subtitles"]["artifacts"]],
+            "encoder": encoder[0],
+            "encode_options": _video_encode_options(preview, encoder),
+            "fonts": _font_signature([], p.template.caption.font_family),
+            "duration": duration,
+        },
     )
-    _validate_audio_clock(d / output, duration)
-    _validate_video_clock(d / output, duration)
+    final_video_path = d / "final_video.mp4"
+    video_validator = lambda path: _validate_video_artifact(path, duration, width, height)
+    if not _checkpoint_valid(manifest["steps"].get("encode-video"), video_fingerprint, d, video_validator):
+        job.start_step("encode-video")
+        _run_video_encode(video_args, "final_video.mp4", preview, encoder, d, job)
+        if not video_validator(final_video_path):
+            final_video_path.unlink(missing_ok=True)
+            raise ValueError("Video encode không vượt qua kiểm tra checkpoint")
+        _record_checkpoint(
+            job, manifest, "encode-video", video_fingerprint, [final_video_path], d,
+            {"duration": duration, "width": width, "height": height, "fps": 30, "encoder": encoder[0]},
+    )
+    job.update(96, "Ghép hình và âm thanh")
+    output_path = d / output
+    output_temporary = d / f".{Path(output).stem}.{job.id}.part.mp4"
+    output_temporary.unlink(missing_ok=True)
+    mux_fingerprint = _mux_fingerprint(job, dependency, duration)
+    mux_validator = lambda path: _validate_video_artifact(
+        path, duration, width, height
+    ) and _validate_audio_artifact(path, duration, audio_codec)
+    if not _checkpoint_valid(manifest["steps"].get("mux"), mux_fingerprint, d, mux_validator):
+        job.start_step("mux")
+        mux_args = [
+                "-i", "final_video.mp4", "-i", "audio.m4a", "-map", "0:v:0",
+                "-map", "1:a:0", "-c", "copy",
+                "-movflags", "+faststart", output_temporary,
+        ]
+        if audio_codec != "aac_mf":
+            mux_args[-1:-1] = ["-t", duration]
+        run_ff(mux_args, cwd=d, job=job)
+        if not mux_validator(output_temporary):
+            output_temporary.unlink(missing_ok=True)
+            raise ValueError("MP4 cuối không vượt qua kiểm tra hình/âm thanh")
+        os.replace(output_temporary, output_path)
+        _record_checkpoint(
+            job, manifest, "mux", mux_fingerprint, [output_path], d,
+            {"duration": duration, "width": width, "height": height, "fps": 30, "audio_sample_rate": 48000},
+        )
     info = probe(d / output)
     if abs(info["duration"] - duration) > 0.3:
         raise ValueError("Thời lượng xuất không khớp timeline")
+    if _final_dependency_fingerprint(p, job, preview, configured_encoder, audio_codec) != dependency:
+        from .errors import InputBlocked
+        raise InputBlocked("MEDIA_CHANGED", "Nguồn, font hoặc cấu hình encode đã đổi trong lúc dựng. Tạo tác vụ từ bản hiện tại.")
     snapshot = original_project.model_dump()
-    (d / "project.json").write_text(
-        json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    for path in d.iterdir():
-        if path.name not in [output, "captions.srt", "captions.ass", "project.json"]:
-            path.unlink()
-    return {
+    store.atomic(d / "project.json", snapshot)
+    result = {
         "id": job.id,
         "filename": output,
-        "duration": round(info["duration"], 2),
+        "duration": round(duration, 2),
         "width": width,
         "height": height,
         "created_at": now(),
         "preview": preview,
-        "size": (d / output).stat().st_size,
+        "source_revision": original_project.content_revision,
+        "size": output_path.stat().st_size,
         "encoder": encoder[0],
+        "audio_encoder": audio_codec,
         "hardware_encoder": encoder[1],
         "clip_cache_hits": cache_hits,
         "clip_cache_misses": len(p.clips) - cache_hits,
         "proxies_used": proxy_count,
         "encoder_fallback": initial_encoder != encoder[0],
         "render_version": RENDER_VERSION,
+        "dependency_fingerprint": dependency,
         "fps": 30,
         "clock_verified": True,
         "sound_effect_count": len(p.sound_effects),
     }
+    manifest["result"] = result
+    _save_render_manifest(job, manifest)
+    for path in d.iterdir():
+        if path.name not in [output, "captions.srt", "captions.ass", "project.json"]:
+            path.unlink()
+    return result

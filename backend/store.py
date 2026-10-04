@@ -1,4 +1,5 @@
 import copy
+import contextvars
 import json
 import os
 import re
@@ -8,6 +9,7 @@ import tempfile
 import threading
 import time
 import zipfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -21,10 +23,23 @@ ROOT = Path(
 ).resolve()
 ROOT.mkdir(parents=True, exist_ok=True)
 LOCK = threading.RLock()
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 7
 SECRET_MASK = "••••••••"
 _instance_handle = None
 _instance_guard = threading.Lock()
+_job_commit_token = contextvars.ContextVar("clipforge_job_commit_token", default="")
+_job_expected_revision = contextvars.ContextVar("clipforge_job_expected_revision", default=None)
+
+
+@contextmanager
+def job_commit_token(token: str, expected_revision: int | None = None):
+    marker = _job_commit_token.set(token)
+    revision_marker = _job_expected_revision.set(expected_revision)
+    try:
+        yield
+    finally:
+        _job_commit_token.reset(marker)
+        _job_expected_revision.reset(revision_marker)
 
 
 def now():
@@ -385,6 +400,14 @@ def _migrate_project(raw):
                         if isinstance(layer, dict):
                             layer.setdefault("font_family", "Arial")
         data["schema_version"] = 5
+        version = 5
+    if version == 5:
+        data.setdefault("job_commit_tokens", [])
+        data["schema_version"] = 6
+        version = 6
+    if version == 6:
+        data.setdefault("content_revision", data.get("revision", 0))
+        data["schema_version"] = 7
     return data
 
 
@@ -410,7 +433,56 @@ def validate_files(p):
     validate_project_files(p, project_dir(p.id))
 
 
-def save(p: Project, history=True, operation_id=None):
+def _job_bookkeeping_path(pid, token):
+    from .recovery_paths import checked_path
+
+    if not re.fullmatch(r"[a-f0-9]{16}", token):
+        raise ValueError("Commit token không hợp lệ")
+    return checked_path(ROOT, project_dir(pid) / ".job-commits" / f"{token}.json")
+
+
+def _file_identity(path):
+    info = path.stat()
+    return {"name": path.name, "size": info.st_size, "mtime_ns": info.st_mtime_ns}
+
+
+def finish_job_bookkeeping(pid, token):
+    """Finish a committed save without saving project.json or applying content."""
+    from .recovery_paths import checked_path, unlink
+
+    with LOCK:
+        journal_path = checked_path(ROOT, _job_bookkeeping_path(pid, token))
+        if not journal_path.exists():
+            return
+        journal = json.loads(journal_path.read_text(encoding="utf-8"))
+        if not isinstance(journal, dict) or journal.get("project_id") != pid or journal.get("commit_token") != token:
+            raise ValueError("Journal commit không khớp dự án/token")
+        if not isinstance(journal.get("project_revision"), int) or not isinstance(journal.get("operation_id"), str) or not all(isinstance(journal.get(key), list) for key in ("redo_to_remove", "history_to_prune")):
+            raise ValueError("Journal commit thiếu metadata hợp lệ")
+        current = read(pid)
+        if token not in current.job_commit_tokens:
+            return  # Prepared before project write; never finalize an uncommitted save.
+        directory = project_dir(pid)
+        if current.revision == journal["project_revision"]:
+            atomic(checked_path(ROOT, directory / ".history_operation.json"), {"id": journal["operation_id"]})
+        # Delete only immutable snapshots captured by this save, never a new
+        # redo/history point created by a later edit or undo.
+        for folder, key in (("redo", "redo_to_remove"), ("history", "history_to_prune")):
+            for entry in journal[key]:
+                if not isinstance(entry, dict) or not isinstance(entry.get("name"), str) or Path(entry["name"]).name != entry["name"] or entry["name"] in {".", "..", ""}:
+                    raise ValueError("Journal history chứa đường dẫn không hợp lệ")
+                path = checked_path(ROOT, directory / folder / entry["name"])
+                if path.exists() and _file_identity(path) == entry:
+                    unlink(ROOT, path)
+        unlink(ROOT, journal_path)
+
+
+def _finish_pending_job_bookkeeping(pid):
+    for path in (project_dir(pid) / ".job-commits").glob("*.json"):
+        finish_job_bookkeeping(pid, path.stem)
+
+
+def save(p: Project, history=True, operation_id=None, *, _recovery_base: Project | None = None):
     with LOCK:
         try:
             validated = Project.model_validate(p.model_dump())
@@ -423,6 +495,7 @@ def save(p: Project, history=True, operation_id=None):
         for field, value in validated.model_dump().items():
             setattr(p, field, getattr(validated, field))
         validate_project(p)
+        _finish_pending_job_bookkeeping(p.id)
         directory = project_dir(p.id)
         current_path = directory / "project.json"
         previous = None
@@ -440,8 +513,33 @@ def save(p: Project, history=True, operation_id=None):
         )
         if current_path.exists():
             raw_bytes = current_path.read_bytes()
+            try:
+                persisted = json.loads(raw_bytes.decode("utf-8"))
+                persisted_tokens = persisted.get("job_commit_tokens", []) if isinstance(persisted, dict) else []
+                persisted_revision = persisted.get("revision") if isinstance(persisted, dict) else None
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                persisted_tokens = []
+                persisted_revision = None
+            expected_revision = _job_expected_revision.get()
+            if expected_revision is not None and persisted_revision != expected_revision:
+                raise ValueError("Dự án đã thay đổi trước khi tác vụ được lưu. Hãy tạo tác vụ mới.")
+            if not isinstance(persisted_tokens, list):
+                persisted_tokens = []
+            p.job_commit_tokens = list(dict.fromkeys([
+                *[value for value in persisted_tokens if isinstance(value, str)],
+                *[value for value in p.job_commit_tokens if isinstance(value, str)],
+                *([_job_commit_token.get()] if _job_commit_token.get() else []),
+            ]))
             if history:
                 previous = read(p.id)
+            current_project = previous or _recovery_base or read(p.id)
+            before_content = current_project.model_dump(
+                exclude={"schema_version", "revision", "content_revision", "updated_at", "exports", "job_commit_tokens"}
+            )
+            after_content = p.model_dump(
+                exclude={"schema_version", "revision", "content_revision", "updated_at", "exports", "job_commit_tokens"}
+            )
+            p.content_revision = current_project.content_revision + int(before_content != after_content)
             try:
                 raw_current = json.loads(raw_bytes.decode("utf-8"))
                 source_version = (
@@ -460,18 +558,42 @@ def save(p: Project, history=True, operation_id=None):
                     current_path, expected_id=p.id
                 )
                 _create_schema_backup(p.id, raw_bytes, backup_project, source_version)
+        elif _job_commit_token.get():
+            p.job_commit_tokens = list(dict.fromkeys([
+                *[value for value in p.job_commit_tokens if isinstance(value, str)],
+                _job_commit_token.get(),
+            ]))
+            p.content_revision = max(1, p.content_revision)
+        elif not current_path.exists():
+            p.content_revision = max(1, p.content_revision)
         if history and current_path.exists() and not coalesced:
             previous = previous or read(p.id)
+            history_path = directory / "history" / f"{previous.revision:08d}.json"
+            if _job_commit_token.get():
+                from .recovery_paths import checked_path
+                history_path = checked_path(ROOT, history_path)
             # Persist the recovery point first. If replacing project.json fails,
             # both the prior file and this independent snapshot remain available.
             atomic(
-                directory / "history" / f"{previous.revision:08d}.json",
+                history_path,
                 previous.model_dump(),
             )
         p.revision += 1
         p.updated_at = now()
+        token = _job_commit_token.get()
+        if token and history:
+            redo_dir = directory / "redo"
+            journal = {
+                "schema_version": 1, "project_id": p.id, "commit_token": token,
+                "project_revision": p.revision, "operation_id": operation_id or "",
+                "redo_to_remove": [_file_identity(path) for path in redo_dir.glob("*.json")] if not coalesced else [],
+                "history_to_prune": [_file_identity(path) for path in _ordered_snapshots(directory / "history")[:-25]],
+            }
+            atomic(_job_bookkeeping_path(p.id, token), journal)
         atomic(current_path, p.model_dump())
-        if history:
+        if token and history:
+            finish_job_bookkeeping(p.id, token)
+        elif history:
             atomic(operation_path, {"id": operation_id or ""})
             if not coalesced:
                 redo = directory / "redo"
@@ -560,6 +682,7 @@ def projects():
                     "id": project.id,
                     "name": project.name,
                     "mode": project.mode,
+                    "revision": project.revision,
                     "updated_at": project.updated_at,
                     "clips": len(project.clips),
                     "corrupt": False,
@@ -606,6 +729,7 @@ def _merge_history_assets(project, current):
 
 def undo(pid):
     with LOCK:
+        _finish_pending_job_bookkeeping(pid)
         latest = next(_valid_history(pid), None)
         if latest is None:
             raise ValueError("Chưa có phiên bản hợp lệ để hoàn tác")
@@ -630,6 +754,7 @@ def undo(pid):
 
 def redo(pid):
     with LOCK:
+        _finish_pending_job_bookkeeping(pid)
         redo_dir = project_dir(pid) / "redo"
         paths = list(reversed(_ordered_snapshots(redo_dir)))
         if not paths:
@@ -680,7 +805,7 @@ def recover(pid):
         # Copy, never move, so a failed restore leaves the broken file intact.
         _preserve_corrupt_current(pid)
         restored.id = pid
-        return save(restored, history=False)
+        return save(restored, history=False, _recovery_base=restored)
 
 
 def _stored_settings_raw():

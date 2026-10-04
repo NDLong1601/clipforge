@@ -31,7 +31,7 @@ def test_schema_v3_migration_adds_unlocked_clip_default(isolated):
 
     migrated = store.read(project.id)
 
-    assert migrated.schema_version == 5
+    assert migrated.schema_version == store.SCHEMA_VERSION
     assert migrated.clips[0].locked is False
 
 

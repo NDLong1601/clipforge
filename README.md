@@ -22,6 +22,8 @@ python launch.py
 
 Tạo gói mã nguồn phát hành (kèm `frontend/dist`, file khóa dependency và hướng dẫn chạy) bằng `python tools/package_release.py`. ZIP cùng tệp SHA-256 được đặt trong `release/`; dữ liệu cá nhân, API key và môi trường cài đặt cục bộ không được đưa vào gói.
 
+Để build UI nguồn mới vào TEMP, tạo ZIP và kiểm tra bằng môi trường Python mới, chạy `.venv/Scripts/python.exe tools/run_reliability_r6_release.py`. Lệnh này cần dependency phát triển và Node đã cài, không ghi đè `frontend/dist` đang có. Gói R6 là ứng viên đã kiểm trên Windows phát triển; phạm vi và các phần hoãn được ghi tại [R6](docs/reliability/R6.md).
+
 ## Nhiều API key, model và chuyển dự phòng
 
 1. Mở chương trình rồi bấm **Cài đặt API** ở góc trên bên phải. Chọn **Gemini**, **OpenAI** hoặc **API tương thích OpenAI**, rồi bấm **Thêm API**. Có thể thêm nhiều khóa, kể cả nhiều khóa cùng một nhà cung cấp.
@@ -167,6 +169,22 @@ npm run build
 Kiểm thử tự động bao gồm: lưu/hoàn tác/làm lại và xung đột revision; phục hồi job gián đoạn; hủy job đang chờ; upload staging và probe chạy nền trong khi health/job polling vẫn đáp ứng; kiểm tra Host/Origin; che key; nhập file có tên bất thường; phân cảnh/lập timeline; template co thời lượng; chặn cắt voice; ghi đè phụ đề; xuất video thật có nhạc, voice tổng hợp tín hiệu, lớp chữ tiếng Việt và karaoke; kiểm tra phản hồi AI.
 
 Hồi quy M3–M5 nằm trong `tests/test_m345_review.py`: lịch sử có tên snapshot cũ, lỗi/hủy upload và lỗi ghi đĩa, backup không chặn lưu/polling/cancel dự án khác, ZIP kèm exports/history, import/trash/template và tổng dung lượng. `frontend/tests` dùng Node test runner, fake timer và harness thực thi hook/component từ source để kiểm tra autosave/flush, dữ liệu server sau normalize, draft hai tab/reload/duplicate tab và trim nhiều pointermove. Đây là test logic frontend; nghiệm thu thao tác thực trên browser được ghi riêng trong `VALIDATION.md`.
+
+### Tiếp tục tác vụ, chẩn đoán và dọn dữ liệu
+
+R5 bổ sung kiểm tra RAM/data/temp. Thiếu telemetry hoặc tài nguyên thì job chờ; thiếu dung lượng giữa encode thì dừng an toàn, giữ checkpoint và cần tiếp tục thủ công sau khi đã đủ tài nguyên. UI hiển thị bước hiện tại; thời gian còn lại chỉ là ước tính cho bước encode đủ dữ liệu. Diagnostic ID liên kết event đã lọc, xoay vòng tối đa 3 × 64 KiB; ZIP không chứa raw log/prompt/media/secret. Lease vẫn được giữ cho toàn job, pause riêng job đang chạy và telemetry GPU được hoãn. Xem [R5](docs/reliability/R5.md) và [nghiệm thu R6](docs/reliability/R6.md).
+
+Mở **Tác vụ** để xem hàng đợi, tạm dừng cấp lượt, ưu tiên hoặc hủy job và mở chi tiết lỗi/checkpoint. Job bị gián đoạn không tự chạy lại. Chọn **Tiếp tục** sau khi xác nhận đầu vào/cấu hình; nếu kết quả provider chưa rõ, chỉ dùng **Xác nhận gửi lại** khi chấp nhận khả năng nhà cung cấp tính phí lần nữa. Lỗi API polling chỉ làm banner kết nối chuyển sang đang thử lại/mất kết nối; không đổi trạng thái job.
+
+Job đã lưu đầu vào nhưng chưa checkpoint có nút **Bắt đầu tác vụ đã lưu** sau restart; job có checkpoint dùng **Tiếp tục từ checkpoint**. Kết quả đã commit nhưng còn thiếu biên nhận/lịch sử dùng **Hoàn tất lưu kết quả**, không chạy lại provider. Trợ lý thiếu prompt đã lưu cần gửi yêu cầu mới. Khi đóng backend, khóa instance được giữ nếu worker chưa dừng để tránh hai tiến trình cùng ghi dữ liệu; trên Windows, cây FFmpeg/helper được kết thúc cùng owner. Xem [nghiệm thu R2](docs/reliability/R2.md).
+
+Nếu revision hoặc cấu hình xử lý đã đổi, job cũ bị chặn trước khi gọi provider. Dùng **Tạo tác vụ từ bản hiện tại** trong chi tiết để tạo job mới; checkpoint cũ vẫn được giữ. Render từ snapshot được kiểm tra lại nguồn, font và cấu hình trước khi dùng lại MP4; cache ASR/phân tích phải khớp nội dung media và schema. Xem [nghiệm thu R3](docs/reliability/R3.md).
+
+Kết quả sau resume được đồng bộ theo từng lần chạy và mở đúng bản xuất của job. Thay đổi không trùng nhau được ghép với bản nháp đang gõ; nếu cùng trường đã đổi, bản nháp được giữ để giải quyết xung đột. Upload tự dựng theo audio chỉ tạo một job tương ứng, kể cả khi mở hai tab hoặc kết nối lại. Xem [nghiệm thu R4](docs/reliability/R4.md).
+
+Trong chi tiết job, xem danh mục trước khi tải ZIP diagnostics. Báo cáo dùng allowlist, không chứa project/media, prompt, transcript, key, settings, raw log hoặc đường dẫn cá nhân; ClipForge không tự gửi báo cáo.
+
+Tác vụ interrupted/error/blocked có checkpoint hợp lệ giữ tham chiếu đến cache. Chọn **Bỏ tác vụ và dữ liệu phục hồi** ở danh sách hoặc chi tiết nếu không muốn tiếp tục. UI nêu dữ liệu sẽ bỏ và cập nhật hàng đợi/dung lượng; nguồn gốc và bản xuất đã lưu được giữ. Sau khi bỏ job, có thể dọn cache dùng chung ở **Dung lượng**. Tác vụ đang chạy vẫn chặn dọn cache. Không xóa thủ công `data/job_runs` hoặc `data/cache` khi còn job muốn tiếp tục. Xem [chính sách checkpoint và nghiệm thu M6](docs/reliability/M6.md), [mã lỗi](docs/reliability/M6_ERROR_CODES.md) và [hướng dẫn rollback](docs/reliability/M6_ROLLBACK.md).
 
 ## Tài liệu kỹ thuật tham khảo
 

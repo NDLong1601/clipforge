@@ -41,7 +41,7 @@ def test_schema_v4_migration_is_idempotent_and_preserves_ids():
     second = store._migrate_project(first)
 
     assert first == second
-    assert first['id'] == project.id and first['schema_version'] == 5
+    assert first['id'] == project.id and first['schema_version'] == store.SCHEMA_VERSION
     assert first['source_volume'] == 0
     assert first['template']['transition_duration'] == .4
     assert first['template']['caption']['font_family'] == 'Arial'
@@ -158,6 +158,9 @@ def test_release_archive_includes_runtime_and_verified_manifest(tmp_path):
         assert prefix + 'frontend/dist/index.html' in names
         assert prefix + 'frontend/package-lock.json' in names
         assert prefix + 'requirements-lock.txt' in names
+        assert prefix + 'docs/reliability/M6.md' in names
+        assert prefix + 'docs/reliability/M6_ERROR_CODES.md' in names
+        assert prefix + 'IMPLEMENTATION_PLAN.md' not in names
         assert not any('/data/' in name or '/.venv/' in name or '/node_modules/' in name for name in names)
         manifest = archive.read(prefix + 'RELEASE-MANIFEST.sha256').decode('utf-8').splitlines()
         for record in manifest:

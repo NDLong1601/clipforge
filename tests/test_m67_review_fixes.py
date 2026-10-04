@@ -79,11 +79,11 @@ def test_render_recovers_from_hardware_failure(monkeypatch,stage):
     def failing_hardware(args, **kwargs):
         if '-c:v' in args:
             encoder = args[args.index('-c:v') + 1]
-            destination=Path(args[-1]).name
+            destination = Path(args[-1]).name
             attempts.append((destination,encoder))
-            should_fail=(stage=='clip' and destination.startswith('clip_') or
-                         stage=='join' and destination=='joined.mp4' or
-                         stage=='final' and destination=='final_video.mp4')
+            should_fail=(stage=='clip' and destination.startswith('.clip_') or
+                         stage=='join' and destination.startswith('.joined.') or
+                         stage=='final' and destination.startswith('.final_video.'))
             if encoder == 'h264_qsv' and should_fail:
                 Path(kwargs['cwd'],destination).write_bytes(b'partial hardware output')
                 failed.append(destination)

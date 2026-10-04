@@ -1,9 +1,10 @@
 import json, re, shutil, os, tempfile, secrets, hashlib, time
+from types import SimpleNamespace
 import anyio
 from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -11,6 +12,7 @@ from pydantic import ValidationError
 from . import (
     store,
     jobs,
+    job_store,
     media,
     providers,
     planner,
@@ -21,8 +23,10 @@ from . import (
 from .preflight import preflight
 from . import template_packages
 from . import portable
+from . import diagnostics
+from .errors import safe_message
 from .template_packages import MissingTemplateAssets
-from .models import Project, Action, Template, Clip, uid, AIApplyRequest, AIApplyCommit
+from .models import Project, Asset, Action, Template, Clip, uid, AIApplyRequest, AIApplyCommit
 from .project_validation import validate_project
 from .font_manager import available as available_fonts
 from . import sound_effects
@@ -31,14 +35,19 @@ from .template_content import bind_placeholders, infer_product
 
 @asynccontextmanager
 async def lifespan(_app):
+    from . import processes
+    processes.ensure_owner()
     store.acquire_instance_lock()
     try:
         jobs.ROOT = store.ROOT
-        jobs.cleanup_staging()
         jobs.initialize()
+        jobs.cleanup_staging()
         yield
     finally:
-        store.release_instance_lock()
+        if jobs.stop_render_jobs():
+            store.release_instance_lock()
+        else:
+            raise RuntimeError("Worker vẫn đang dừng; giữ khóa instance đến khi tiến trình backend thoát.")
 
 
 app = FastAPI(title="ClipForge Local", version="1.0.0", lifespan=lifespan)
@@ -102,17 +111,276 @@ def unlocked(pid):
         raise HTTPException(409, "Dự án đang xử lý. Chờ hoàn tất hoặc hủy tác vụ.")
 
 
-def task(pid, kind, operation):
-    store.read(pid)
+def task(pid, kind, operation, revision=None):
+    """Submit only serializable operation arguments; handlers live in the registry."""
+    payload = operation if isinstance(operation, dict) else {}
+    with jobs.LOCK, store.LOCK:
+        snapshot = store.read(pid)
+        if revision is not None and revision != snapshot.revision:
+            raise HTTPException(409, "Dự án đã đổi. Tải lại dự án trước khi tạo tác vụ.")
+        return jobs.submit(
+            pid,
+            kind,
+            payload,
+            snapshot.model_dump(),
+            config_fingerprint=_job_config_fingerprint(kind),
+        )
 
-    def perform(job):
-        p = store.read(pid)
-        p = operation(p, job)
-        job.check()
-        job.commit(lambda: store.save(p))
-        return {"project_id": p.id, "revision": p.revision}
 
-    return jobs.submit(pid, kind, perform)
+def _job_config_fingerprint(kind):
+    from . import job_inputs
+    return job_inputs.config_fingerprint(kind)
+
+
+def _run_project_job(job):
+    from . import job_inputs
+    if job._settings is None:
+        job_inputs.validate_before_run(job, capture_settings=True)
+    snapshot = job_store.load_snapshot(jobs.ROOT, job.snapshot_ref)
+    p = Project.model_validate(snapshot)
+    payload = job.payload
+    render_info = None
+    result_fingerprint = job_store.fingerprint({
+        "input": job.input_fingerprint,
+        "config": job.config_fingerprint,
+        "kind": job.kind,
+        "operation_version": job.operation_version,
+        "media": job_inputs.media_identity(p),
+        "result_schema": job_inputs.PROJECT_RESULT_VERSION,
+    })
+    cached_value = (
+        job.load_checkpoint("project-result", result_fingerprint)
+        if job.kind != "render"
+        else None
+    )
+    cached_project = job_inputs.cached_project(cached_value, p)
+    if cached_project is not None:
+        p = cached_project
+    elif job.kind == "analyze":
+        sources = [a for a in p.assets if a.role == "source" and not a.deleted]
+        if not sources:
+            raise ValueError("Chưa có video/ảnh nguồn")
+        for index, source_asset in enumerate(sources):
+            asset = store.get_asset(p, source_asset.id)
+            source_path = store.asset_path(p.id, asset)
+            fingerprint = job_store.fingerprint({
+                "asset_id": asset.id,
+                "source_sha256": media.file_sha256(source_path),
+                "analysis_version": media.ANALYSIS_VERSION,
+                "thumbnail_version": 1,
+            })
+            cached_asset = job_inputs.cached_asset(job.load_checkpoint(f"analyze-asset:{asset.id}", fingerprint), p, asset)
+            if cached_asset is not None:
+                p.assets[p.assets.index(asset)] = cached_asset
+                continue
+            job.update(5 + 30 * index / len(sources), "Tách cảnh: " + asset.name)
+            if not asset.scenes:
+                media.analyze(p.id, asset, job)
+            else:
+                media.refresh_scene_thumbnails(p.id, asset, job)
+            job.save_checkpoint(f"analyze-asset:{asset.id}", fingerprint, job_inputs.asset_result(p, asset))
+        if payload.get("use_ai"):
+            providers.label_scenes(p, job)
+            infer_product(p, job)
+        if p.avoid_faces:
+            face_filter.clean_pool(p, job)
+    elif job.kind == "plan":
+        p = planner.plan(p, bool(payload.get("use_ai")), job)
+    elif job.kind == "voice":
+        p = providers.synthesize(p, job)
+    elif job.kind == "assemble-audio":
+        p = audio_assembly.assemble(p, job)
+    elif job.kind == "filter-faces":
+        p = face_filter.filter_timeline(p, job)
+    elif job.kind == "transcribe":
+        asset = store.get_asset(p, payload.get("asset_id") or p.voice_id)
+        p = providers.transcribe(p, asset, job)
+    elif job.kind == "template":
+        asset = store.get_asset(p, payload.get("asset_id"))
+        if asset.role != "reference":
+            raise ValueError("Chọn một video mẫu")
+        job.update(10, "Phân tích nhịp cắt của video mẫu")
+        media.analyze(p.id, asset, job)
+        if payload.get("use_ai"):
+            p.template = providers.infer_template(p, asset, job)
+        else:
+            from .template_utils import compressed_slot_durations
+
+            p.template = planner.presets()[0].model_copy(deep=True)
+            p.template.name = "Nhịp mẫu — " + asset.name
+            p.template.slot_durations = compressed_slot_durations(asset)
+            simplified = len(asset.scenes) > 100
+            p.template.notes = (
+                ("Đã gộp nhịp liên tiếp để vừa giới hạn 100 ô; toàn bộ cảnh gốc và thời lượng video mẫu vẫn được giữ. " if simplified else "")
+                + "Đã lấy nhịp cắt. Chỉnh khung/lớp thủ công hoặc bật AI để nhận diện bố cục."
+            )
+        p.mode = "template"
+    elif job.kind == "render":
+        render_info = render.render(p, job, bool(payload.get("preview")))
+    elif job.kind == "demo":
+        from .demo import build_demo
+
+        p = build_demo(p, job)
+    else:
+        raise ValueError(f"Không có project handler cho loại job {job.kind}")
+    if render_info is None and cached_project is None:
+        job.save_checkpoint("project-result", result_fingerprint, job_inputs.project_result(p))
+    job.check()
+    if render_info is not None:
+        def commit_render_export():
+            latest = store.read(p.id)
+            if any(item.get("id") == job.id for item in latest.exports):
+                return latest
+            render_info["project_revision"] = latest.revision + 1
+            latest.exports.append(render_info)
+            return store.save(latest)
+
+        saved = job.commit(commit_render_export, project_id=p.id, allow_latest=True)
+    else:
+        saved = job.commit(lambda: store.save(p), project_id=p.id)
+    return {"project_id": saved.id, "revision": saved.revision}
+
+
+def _run_assistant_job(job):
+    p = Project.model_validate(job_store.load_snapshot(jobs.ROOT, job.snapshot_ref))
+    job.update(10, "AI đang đề xuất chỉnh sửa")
+    prompt = _ASSISTANT_INPUTS.pop(job.id, "")
+    if not prompt:
+        raise ValueError("Yêu cầu AI cần được gửi lại sau khi ứng dụng khởi động lại.")
+    result = providers.assistant(p, prompt, job)
+    result["revision"] = p.revision
+    result["proposal_id"] = job.id
+    return result
+
+
+def _run_upload_job(job):
+    payload = job.payload
+    from . import upload_recovery
+    from .recovery_paths import checked_path
+    stage = checked_path(store.ROOT, store.ROOT / "staging" / job.pid / job.id)
+    previous_moves = {entry["destination"]: entry for entry in upload_recovery.load(store.ROOT, job.pid, job.id)}
+    files = payload.get("files", [])
+    if not files or payload.get("upload_incomplete"):
+        raise ValueError("Upload chưa nhận đủ file; hãy chọn file để gửi lại.")
+    role = payload.get("role", "source")
+    if role not in {"source", "reference", "voice", "music", "overlay"}:
+        raise ValueError("Loại tư liệu không hợp lệ")
+    staged = []
+    assets = []
+    for index, item in enumerate(files):
+        staged_name = Path(str(item.get("staged_name", ""))).name
+        original_name = Path(str(item.get("name", "Tư liệu"))).name
+        path = checked_path(store.ROOT, stage / "files" / staged_name)
+        destination = checked_path(store.ROOT, store.project_dir(job.pid) / "assets" / staged_name)
+        checked_path(store.ROOT, stage / "thumbs")
+        checked_path(store.ROOT, store.project_dir(job.pid) / "thumbs")
+        if not staged_name or not path.is_file() and not destination.is_file():
+            raise ValueError("File tải lên đã mất; hãy chọn file để gửi lại.")
+        if not path.is_file():
+            owned = previous_moves.get(f"assets/{staged_name}")
+            if not owned or media.file_sha256(destination) != owned["sha256"]:
+                raise ValueError("File tại đích upload không còn khớp journal; dữ liệu được giữ để kiểm tra.")
+            path = destination
+        staged.append((path, original_name))
+        job.update(10 + 70 * index / len(files), "Kiểm tra và tạo ảnh xem trước: " + original_name)
+        content_hash = media.file_sha256(path)
+        fingerprint = job_store.fingerprint({
+            "staged_name": staged_name,
+            "name": original_name,
+            "role": role,
+            "sha256": content_hash,
+            "version": 1,
+        })
+        step_id = f"upload-file:{index:03d}"
+        cached = job.load_checkpoint(step_id, fingerprint)
+        asset = None
+        if isinstance(cached, dict):
+            try:
+                candidate = Asset.model_validate(cached)
+                thumb = store.project_dir(job.pid) / "thumbs" / candidate.thumbnail
+                stage_thumb = stage / "thumbs" / candidate.thumbnail
+                if (candidate.filename == staged_name
+                        and media.file_sha256(path) == content_hash
+                        and (not candidate.thumbnail or thumb.is_file() or stage_thumb.is_file())):
+                    asset = candidate
+            except (ValueError, TypeError, OSError):
+                asset = None
+        if asset is None:
+            asset = media.register(
+                job.pid, path, original_name, role, job, thumbnail_dir=stage / "thumbs"
+            )
+            job.save_checkpoint(step_id, fingerprint, asset.model_dump())
+        assets.append(asset)
+
+    from . import recovery_paths, upload_recovery
+    entries = []
+    for path, _ in staged:
+        entries.append({"source": f"files/{path.name}", "destination": f"assets/{path.name}",
+            "sha256": media.file_sha256(path)})
+    for asset in assets:
+        if asset.thumbnail:
+            thumb_source = checked_path(store.ROOT, stage / "thumbs" / asset.thumbnail)
+            thumb_dest = checked_path(store.ROOT, store.project_dir(job.pid) / "thumbs" / asset.thumbnail)
+            source = thumb_source if thumb_source.is_file() else thumb_dest
+            entries.append({"source": f"thumbs/{asset.thumbnail}", "destination": f"thumbs/{asset.thumbnail}",
+                "sha256": media.file_sha256(source)})
+    for entry in entries:
+        destination = recovery_paths.checked_path(store.ROOT, store.project_dir(job.pid) / entry["destination"])
+        if destination.is_file() and media.file_sha256(destination) != entry["sha256"]:
+            raise ValueError("Đã có file khác tại đích upload; dữ liệu gốc được giữ lại.")
+
+    def commit():
+        # Journal every planned move before the first rename. A crash between
+        # rename and save can be recovered from either source or destination.
+        upload_recovery.prepare(store.ROOT, job.pid, job.id, entries)
+        try:
+            with store.LOCK:
+                current = store.read(job.pid)
+                if current.revision != job.input_revision:
+                    raise ValueError("Dự án đã thay đổi trong lúc nhập tư liệu. Hãy thử nhập lại.")
+                (store.project_dir(job.pid) / "assets").mkdir(parents=True, exist_ok=True)
+                (store.project_dir(job.pid) / "thumbs").mkdir(parents=True, exist_ok=True)
+                for entry in entries:
+                    source = recovery_paths.checked_path(store.ROOT, stage / entry["source"])
+                    destination = recovery_paths.checked_path(store.ROOT, store.project_dir(job.pid) / entry["destination"])
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    if source.is_file() and not destination.exists():
+                        os.replace(source, destination)
+                current.assets.extend(assets)
+                if role == "voice":
+                    current.voice_id = assets[-1].id
+                    current.cue_timing = "estimated"
+                    current.cues = planner.estimated_cues(current.script, assets[-1].duration)
+                    current.cues_edited = False
+                    current.cues_stale = False
+                    current.target_duration = min(180, max(current.target_duration, assets[-1].duration))
+                if role == "music":
+                    current.music_id = assets[-1].id
+                return store.save(current)
+        except BaseException:
+            # Never unlink moved bytes. Only a proven uncommitted upload may
+            # return its unreferenced files to staging; retain on uncertainty.
+            if jobs.reconcile_commit(job, finalize=False)["state"] == "uncommitted":
+                try:
+                    upload_recovery.restore(store.ROOT, job.pid, job.id)
+                except (OSError, ValueError):
+                    pass
+            raise
+
+    job.update(85, "Lưu tư liệu vào dự án")
+    snapshot = job_store.load_snapshot(jobs.ROOT, job.snapshot_ref)
+    auto_assemble = bool(payload.get("auto_assemble") and role in ("voice", "source")
+        and (role == "voice" or snapshot.get("voice_id")))
+    with jobs.project_lock(job.pid):
+        saved = job.commit(commit, project_id=job.pid, result_metadata={"auto_assemble": auto_assemble})
+    return {"project_id": saved.id, "revision": saved.revision, "auto_assemble": auto_assemble}
+
+
+for _kind in ("analyze", "plan", "voice", "assemble-audio", "filter-faces", "transcribe", "template", "render", "demo"):
+    jobs.register_handler(_kind, _run_project_job)
+jobs.register_handler("assistant", _run_assistant_job)
+jobs.register_handler("upload", _run_upload_job)
+_ASSISTANT_INPUTS: dict[str, str] = {}
 
 
 @app.get("/api/health")
@@ -151,7 +419,8 @@ def windows_voices():
         return []
     import subprocess
 
-    result = subprocess.run(
+    from . import processes
+    result = processes.run(
         [
             "powershell.exe",
             "-NoProfile",
@@ -499,10 +768,17 @@ async def upload(
         initial = store.read(pid)
         with jobs.project_lock(pid):
             job = jobs.reserve(
-                pid, "upload", phase="uploading", message="Đang nhận tư liệu"
+                pid,
+                "upload",
+                phase="uploading",
+                message="Đang nhận tư liệu",
+                payload={"role": role, "auto_assemble": auto_assemble, "files": []},
+                snapshot=initial.model_dump(),
+                config_fingerprint=_job_config_fingerprint("upload"),
             )
     stage = store.ROOT / "staging" / pid / job.id
-    job._cleanup = lambda: shutil.rmtree(stage, ignore_errors=True)
+    from .recovery_paths import remove_tree
+    job._cleanup = lambda: remove_tree(store.ROOT, stage)
     staged = []
     copied = 0
     try:
@@ -532,80 +808,29 @@ async def upload(
                 phase="uploading",
             )
 
-        def process(job):
-            assets = []
-            for index, (path, name) in enumerate(staged):
-                job.update(
-                    10 + 70 * index / len(staged),
-                    "Kiểm tra và tạo ảnh xem trước: " + name,
-                )
-                assets.append(
-                    media.register(
-                        pid, path, name, role, job, thumbnail_dir=stage / "thumbs"
-                    )
-                )
-
-            def commit():
-                moved = []
-                project_dir = store.project_dir(pid)
-                asset_dir = project_dir / "assets"
-                thumb_dir = project_dir / "thumbs"
-                asset_dir.mkdir(parents=True, exist_ok=True)
-                thumb_dir.mkdir(parents=True, exist_ok=True)
-                try:
-                    for path, _ in staged:
-                        dest = asset_dir / path.name
-                        os.replace(path, dest)
-                        moved.append(dest)
-                    for asset in assets:
-                        # Audio has no thumbnail; an empty name would resolve to
-                        # the thumbs directory and try to replace the whole folder.
-                        if not asset.thumbnail:
-                            continue
-                        thumb_source = stage / "thumbs" / asset.thumbnail
-                        if thumb_source.is_file():
-                            thumb_dest = thumb_dir / asset.thumbnail
-                            os.replace(thumb_source, thumb_dest)
-                            moved.append(thumb_dest)
-                    current = store.read(pid)
-                    if current.revision != initial.revision:
-                        raise ValueError(
-                            "Dự án đã thay đổi trong lúc nhập tư liệu. Hãy thử nhập lại."
-                        )
-                    current.assets.extend(assets)
-                    if role == "voice":
-                        current.voice_id = assets[-1].id
-                        current.cue_timing = "estimated"
-                        current.cues = planner.estimated_cues(
-                            current.script, assets[-1].duration
-                        )
-                        current.cues_edited = False
-                        current.cues_stale = False
-                        current.target_duration = min(
-                            180, max(current.target_duration, assets[-1].duration)
-                        )
-                    if role == "music":
-                        current.music_id = assets[-1].id
-                    saved = store.save(current)
-                    return saved
-                except BaseException:
-                    for path in moved:
-                        path.unlink(missing_ok=True)
-                    raise
-
-            job.update(85, "Lưu tư liệu vào dự án")
-            with jobs.project_lock(pid):
-                saved = job.commit(commit)
-            return {
-                "project_id": saved.id,
-                "revision": saved.revision,
-                "auto_assemble": bool(
-                    auto_assemble and role in ("voice", "source") and saved.voice_id
-                ),
+        job.payload["files"] = [
+            {"staged_name": path.name, "name": name} for path, name in staged
+        ]
+        job.input_fingerprint = job_store.fingerprint(
+            {
+                "kind": job.kind,
+                "operation_version": job.operation_version,
+                "payload": job.payload,
+                "snapshot": initial.model_dump(),
+                "config_fingerprint": job.config_fingerprint,
             }
-
+        )
+        job.save_checkpoint(
+            "upload-received",
+            job_store.fingerprint({"files": job.payload["files"], "role": role}),
+            [
+                {"staged_name": path.name, "sha256": media.file_sha256(path), "size": path.stat().st_size}
+                for path, _ in staged
+            ],
+        )
+        jobs._persist(job)
         job.update(10, "Đã nhận file, đang chờ kiểm tra", phase="queued")
-        job_dump = jobs.launch(job, process)
+        job_dump = jobs.launch(job)
         return {"project": initial, "job": job_dump}
     except BaseException as exc:
         job.cancelled.set()
@@ -628,7 +853,22 @@ async def upload(
             # Keep the original upload error even if the disk cannot persist its status.
             pass
         finally:
-            shutil.rmtree(stage, ignore_errors=True)
+            if staged and job.status != "cancelled":
+                # Retain fully received files if a later file/launch failed.
+                # Incomplete transfers cannot silently resume as a subset.
+                job.payload["files"] = [{"staged_name": path.name, "name": name} for path, name in staged]
+                job.payload["upload_incomplete"] = len(staged) != len(files)
+                job.input_fingerprint = job_store.fingerprint({"kind": job.kind,
+                    "operation_version": job.operation_version, "payload": job.payload,
+                    "snapshot": initial.model_dump(), "config_fingerprint": job.config_fingerprint})
+                if job.payload["upload_incomplete"]:
+                    job.resume_capability = "restart_only"
+                jobs._persist_safely(job)
+            else:
+                try:
+                    remove_tree(store.ROOT, stage)
+                except (OSError, ValueError):
+                    pass
         raise
 
 
@@ -680,55 +920,59 @@ def thumb(pid: str, name: str):
 
 @app.post("/api/projects/{pid}/analyze")
 def analyze(pid: str, action: Action):
-    def op(p, job):
-        sources = [a for a in p.assets if a.role == "source" and not a.deleted]
-        if not sources:
-            raise ValueError("Chưa có video/ảnh nguồn")
-        for i, a in enumerate(sources):
-            job.update(5 + 30 * i / len(sources), "Tách cảnh: " + a.name)
-            if not a.scenes:
-                media.analyze(pid, a, job)
-            else:
-                media.refresh_scene_thumbnails(pid, a, job)
-        if action.use_ai:
-            providers.label_scenes(p, job)
-            infer_product(p, job)
-        if p.avoid_faces:
-            face_filter.clean_pool(p, job)
-        return p
-
-    return task(pid, "analyze", op)
+    return task(pid, "analyze", {"use_ai": action.use_ai}, action.revision)
 
 
 @app.post("/api/projects/{pid}/plan")
 def plan(pid: str, action: Action):
-    return task(pid, "plan", lambda p, j: planner.plan(p, action.use_ai, j))
+    return task(pid, "plan", {"use_ai": action.use_ai}, action.revision)
 
 
 @app.post("/api/projects/{pid}/voice")
 def voice(pid: str):
-    return task(pid, "voice", providers.synthesize)
+    return task(pid, "voice", {})
 
 
 @app.post("/api/projects/{pid}/assemble-audio")
-def assemble_audio(pid: str):
-    return task(pid, "assemble-audio", audio_assembly.assemble)
+def assemble_audio(pid: str, data: dict | None = None):
+    upload_id = (data or {}).get("upload_job_id")
+    if upload_id is None:
+        return task(pid, "assemble-audio", {})
+    # Durable idempotency covers two tabs, a lost POST response and reconnect.
+    # The reserved job itself is the receipt, before it becomes dispatchable.
+    with jobs.LOCK, store.LOCK:
+        upload = jobs.JOBS.get(upload_id) if isinstance(upload_id, str) else None
+        if not upload or upload.pid != pid or upload.kind != "upload" or upload.status != "done" or not isinstance(upload.result, dict) or not upload.result.get("auto_assemble"):
+            raise HTTPException(409, "Tác vụ nhập tư liệu chưa sẵn sàng để dựng theo audio.")
+        for existing in jobs.JOBS.values():
+            legacy_match = (
+                isinstance(upload.result.get("revision"), int)
+                and not isinstance(upload.result.get("revision"), bool)
+                and not existing.payload.get("upload_job_id")
+                and not existing.parent_job_id
+                and existing.input_revision == upload.result.get("revision")
+                and existing.created_at >= upload.created_at
+            )
+            if existing.pid == pid and existing.kind == "assemble-audio" and (existing.payload.get("upload_job_id") == upload_id or existing.parent_job_id == upload_id or legacy_match):
+                if legacy_match:
+                    # Linking a pre-R4 follow-up does not alter its input payload
+                    # or invalidate the saved snapshot/fingerprint.
+                    existing.parent_job_id = upload_id
+                    jobs._persist(existing)
+                if existing.status == "queued" and not existing.dispatch_ready:
+                    return jobs.launch(existing)
+                return existing.dump()
+        return task(pid, "assemble-audio", {"upload_job_id": upload_id})
 
 
 @app.post("/api/projects/{pid}/filter-faces")
 def filter_faces(pid: str):
-    return task(pid, "filter-faces", face_filter.filter_timeline)
+    return task(pid, "filter-faces", {})
 
 
 @app.post("/api/projects/{pid}/transcribe")
 def transcribe(pid: str, action: Action):
-    return task(
-        pid,
-        "transcribe",
-        lambda p, j: providers.transcribe(
-            p, store.get_asset(p, action.asset_id or p.voice_id), j
-        ),
-    )
+    return task(pid, "transcribe", {"asset_id": action.asset_id}, action.revision)
 
 
 @app.get("/api/templates")
@@ -842,49 +1086,85 @@ def validate_template(t: Template):
 
 @app.post("/api/projects/{pid}/template")
 def make_template(pid: str, action: Action):
-    def op(p, job):
-        a = store.get_asset(p, action.asset_id)
-        if a.role != "reference":
-            raise ValueError("Chọn một video mẫu")
-        job.update(10, "Phân tích nhịp cắt của video mẫu")
-        media.analyze(pid, a, job)
-        if action.use_ai:
-            p.template = providers.infer_template(p, a, job)
-        else:
-            from .template_utils import compressed_slot_durations
-
-            p.template = planner.presets()[0].model_copy(deep=True)
-            p.template.name = "Nhịp mẫu — " + a.name
-            p.template.slot_durations = compressed_slot_durations(a)
-            simplified = len(a.scenes) > 100
-            p.template.notes = (
-                (
-                    "Đã gộp nhịp liên tiếp để vừa giới hạn 100 ô; toàn bộ cảnh gốc và thời lượng video mẫu vẫn được giữ. "
-                    if simplified
-                    else ""
-                )
-                + "Đã lấy nhịp cắt. Chỉnh khung/lớp thủ công hoặc bật AI để nhận diện bố cục."
-            )
-        p.mode = "template"
-        return p
-
-    return task(pid, "template", op)
+    return task(pid, "template", {"asset_id": action.asset_id, "use_ai": action.use_ai}, action.revision)
 
 
 @app.post("/api/projects/{pid}/render")
 def export(pid: str, action: Action):
-    current = store.read(pid)
+    with jobs.LOCK, store.LOCK:
+        unlocked(pid)
+        current = store.read(pid)
+        if action.revision is not None and action.revision != current.revision:
+            raise HTTPException(409, "Dự án đã đổi. Tải lại dự án trước khi xuất.")
+        snapshot = current.model_dump()
     report = preflight(current, store.project_dir(pid))
     if not report["ok"]:
         raise HTTPException(400, detail=report)
+    with jobs.LOCK, store.LOCK:
+        if not store.project_dir(pid).is_dir():
+            raise HTTPException(404, "Không tìm thấy dự án")
+        return jobs.submit(
+            pid,
+            "render",
+            {"preview": action.preview},
+            snapshot,
+            config_fingerprint=_job_config_fingerprint("render"),
+        )
 
-    def op(p, job):
-        info = render.render(p, job, action.preview)
-        info["project_revision"] = p.revision + 1
-        p.exports.append(info)
-        return p
 
-    return task(pid, "render", op)
+@app.post("/api/jobs/render-batch")
+def batch_render(data: dict):
+    entries = data.get("projects") if isinstance(data, dict) else None
+    preview = data.get("preview", False) if isinstance(data, dict) else False
+    if not isinstance(entries, list) or not entries or len(entries) > 50:
+        raise HTTPException(422, "Chọn từ 1 đến 50 dự án để xếp hàng xuất.")
+    if not isinstance(preview, bool):
+        raise HTTPException(422, "preview phải là giá trị boolean.")
+    normalized = []
+    seen = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise HTTPException(422, "Mỗi dự án cần có id và revision.")
+        pid, revision = entry.get("id"), entry.get("revision")
+        if not isinstance(pid, str) or not re.fullmatch(r"[a-f0-9]{16}", pid):
+            raise HTTPException(422, "Mã dự án không hợp lệ.")
+        if pid in seen:
+            continue
+        if not isinstance(revision, int) or isinstance(revision, bool) or revision < 0:
+            raise HTTPException(422, "Cần revision hiện tại cho từng dự án.")
+        seen.add(pid)
+        normalized.append((pid, revision))
+
+    accepted, rejected = [], []
+    for pid, revision in normalized:
+        try:
+            with jobs.LOCK, store.LOCK:
+                project = store.read(pid)
+                if project.revision != revision:
+                    raise ValueError("Dự án đã đổi. Tải lại danh sách trước khi xếp hàng.")
+                snapshot = project.model_dump()
+            report = preflight(project, store.project_dir(pid))
+            if not report.get("ok"):
+                issues = report.get("issues") or []
+                detail = "; ".join(
+                    str(item.get("message", "")) for item in issues[:3]
+                    if isinstance(item, dict) and item.get("message")
+                ) or "Dự án chưa qua kiểm tra trước khi xuất."
+                raise ValueError(detail)
+            with jobs.LOCK, store.LOCK:
+                if not store.project_dir(pid).is_dir():
+                    raise ValueError("Dự án đã được chuyển đi trong lúc kiểm tra.")
+                queued = jobs.submit(
+                    pid,
+                    "render",
+                    {"preview": preview},
+                    snapshot,
+                    config_fingerprint=_job_config_fingerprint("render"),
+                )
+            accepted.append(queued)
+        except Exception as exc:
+            rejected.append({"pid": pid, "message": str(exc)[:600]})
+    return {"accepted": accepted, "rejected": rejected}
 
 
 @app.get("/api/projects/{pid}/exports/{eid}/{name}")
@@ -923,8 +1203,253 @@ def import_edit(pid: str, data: Project):
 
 
 @app.get("/api/jobs")
-def list_jobs(pid: str | None = None):
-    return jobs.all_jobs(pid)
+def list_jobs(pid: str | None = None, limit: int = 100, offset: int = 0):
+    return [_public_job_details(record, include_result=True) for record in jobs.all_jobs(pid, limit=limit, offset=offset)]
+
+
+@app.get("/api/jobs/queue")
+def get_job_queue():
+    return _public_queue_state(jobs.scheduler_state())
+
+
+@app.patch("/api/jobs/queue")
+def update_job_queue(data: dict):
+    if not isinstance(data, dict) or not data or set(data) - {"paused", "low_resource"}:
+        raise HTTPException(422, "Cần gửi paused hoặc low_resource để cập nhật hàng đợi.")
+    if any(not isinstance(value, bool) for value in data.values()):
+        raise HTTPException(422, "paused và low_resource phải là giá trị boolean.")
+    return _public_queue_state(jobs.update_scheduler(
+        paused=data.get("paused"),
+        low_resource=data.get("low_resource"),
+    ))
+
+
+def _public_queue_state(state):
+    state = dict(state)
+    state.pop("disk_volumes", None)
+    state["jobs"] = [_public_job_details(record) for record in state.get("jobs", [])]
+    return state
+
+
+def _public_job_details(job, *, include_result=False):
+    """Expose actionable job telemetry without payloads, fingerprints, or profile names."""
+    details = job.dump() if hasattr(job, "dump") else dict(job)
+    private_fields = ["snapshot_ref", "input_fingerprint", "config_fingerprint", "commit_token"]
+    if not include_result:
+        private_fields.append("result")
+    for private in private_fields:
+        details.pop(private, None)
+    details["message"] = safe_message(details.get("message", ""))
+    raw_steps = details.get("steps") if isinstance(details.get("steps"), list) else []
+    details["steps"] = [
+        {
+            "id": safe_message(step.get("id", ""), 80),
+            "status": step.get("status"),
+            "completed_at": step.get("completed_at"),
+        }
+        for step in raw_steps if isinstance(step, dict)
+    ][:100]
+    raw_intents = details.get("provider_intents") if isinstance(details.get("provider_intents"), list) else []
+    details["provider_intents"] = [
+        {
+            key: intent.get(key)
+            for key in ("status", "operation", "started_at", "finished_at", "authorized_at")
+            if intent.get(key) is not None
+        }
+        for intent in raw_intents if isinstance(intent, dict)
+    ][-50:]
+    raw_calls = details.get("provider_calls") if isinstance(details.get("provider_calls"), list) else []
+    details["provider_calls"] = [
+        {
+            **({"provider": call.get("provider") if isinstance(call.get("provider"), str) and re.fullmatch(r"[a-zA-Z0-9_-]{1,30}", call.get("provider")) else "custom"}),
+            **{
+                key: call.get(key)
+                for key in ("fallback", "attempt", "elapsed_ms", "outcome", "status_code")
+                if call.get(key) is not None
+            },
+        }
+        for call in raw_calls if isinstance(call, dict)
+    ][-50:]
+    def public_error(error):
+        if not isinstance(error, dict):
+            return None
+        visible = {
+            key: error.get(key)
+            for key in ("code", "category", "severity", "job_id", "step_id", "retryable", "actions", "diagnostic_id", "occurred_at")
+            if key in error
+        }
+        visible["message"] = safe_message(error.get("message", ""))
+        if visible.get("step_id"):
+            visible["step_id"] = safe_message(visible["step_id"], 80)
+        visible["safe_details"] = {
+            key: error.get("safe_details", {}).get(key)
+            for key in ("exception_type", "http_status")
+            if isinstance(error.get("safe_details"), dict) and key in error["safe_details"]
+        }
+        visible["detail"] = visible["message"]
+        return visible
+    details["error"] = public_error(details.get("error"))
+    raw_error_history = details.get("error_history") if isinstance(details.get("error_history"), list) else []
+    details["error_history"] = [
+        {
+            "attempt": entry.get("attempt") if isinstance(entry.get("attempt"), int) else None,
+            "finished_at": entry.get("finished_at") if isinstance(entry.get("finished_at"), str) else None,
+            "error": public_error(entry.get("error")),
+        }
+        for entry in raw_error_history if isinstance(entry, dict)
+    ][-50:]
+    if isinstance(details.get("blocked_reason"), dict):
+        details["blocked_reason"] = {
+            "code": details["blocked_reason"].get("code"),
+            "message": safe_message(details["blocked_reason"].get("message", "")),
+        }
+    return details
+
+
+@app.get("/api/jobs/{jid}/diagnostics/preview")
+def preview_job_diagnostics(jid: str):
+    with jobs.LOCK:
+        if jid not in jobs.JOBS:
+            raise HTTPException(404, "Không tìm thấy tác vụ")
+    return diagnostics.preview_manifest()
+
+
+@app.get("/api/jobs/{jid}/diagnostics.zip")
+def download_job_diagnostics(jid: str):
+    with jobs.LOCK:
+        job = jobs.JOBS.get(jid)
+        if not job:
+            raise HTTPException(404, "Không tìm thấy tác vụ")
+        snapshot = SimpleNamespace(**job.dump())
+        scheduler = jobs.scheduler_state()
+    report = diagnostics.build_zip(snapshot, scheduler)
+    filename = f"clipforge-diagnostic-{re.sub(r'[^a-f0-9]', '', jid)[:16] or 'job'}.zip"
+    return StreamingResponse(
+        report,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/api/jobs/{jid}")
+def get_job(jid: str):
+    with jobs.LOCK:
+        job = jobs.JOBS.get(jid)
+        if not job:
+            raise HTTPException(404, "Không tìm thấy tác vụ")
+        details = _public_job_details(job)
+        resumable_kinds = {"render", "analyze", "plan", "template", "filter-faces", "assemble-audio", "voice", "transcribe", "upload"}
+        details["can_resume"] = bool(
+            job.commit_state == "committed" and job.bookkeeping_pending
+            or job.kind in resumable_kinds
+            and job.status in ("interrupted", "error")
+            and job.resume_capability in ("checkpointed", "snapshot")
+        )
+        details["can_retry_unknown"] = bool(
+            job.kind != "assistant"
+            and job.status == "blocked"
+            and isinstance(job.blocked_reason, dict)
+            and job.blocked_reason.get("code") == "PROVIDER_OUTCOME_UNKNOWN"
+        )
+        details["can_restart_current"] = _can_restart_current(job)
+        render_job = job if job.kind == "render" and not job.bookkeeping_pending else None
+    if render_job and render_job.kind == "render":
+        details["resume_plan"] = render.resume_plan(render_job)
+    return details
+
+
+def _can_restart_current(job):
+    return bool(job.status == "blocked" and not job.resource_lease
+        and not (job._future and not job._future.done())
+        and not (isinstance(job.result, dict) and job.result.get("replacement_job_id"))
+        and job.kind in {"render", "analyze", "plan", "template", "filter-faces", "assemble-audio", "voice", "transcribe"}
+        and isinstance(job.blocked_reason, dict)
+        and job.blocked_reason.get("code") in {"REVISION_CONFLICT", "CONFIG_CHANGED", "CHECKPOINT_INVALID", "MEDIA_CHANGED"})
+
+
+@app.post("/api/jobs/{jid}/resume")
+def resume_job(jid: str, data: dict):
+    expected_state_version = data.get("state_version") if isinstance(data, dict) else None
+    if not isinstance(expected_state_version, int) or isinstance(expected_state_version, bool):
+        raise HTTPException(422, "Cần state_version hiện tại để tiếp tục tác vụ.")
+    with jobs.LOCK:
+        existing = jobs.JOBS.get(jid)
+        if not existing:
+            raise HTTPException(404, "Không tìm thấy tác vụ")
+        kind = existing.kind
+    try:
+        resumed = jobs.resume_render(
+            jid,
+            expected_state_version,
+            _job_config_fingerprint(kind),
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if resumed is None:
+        raise HTTPException(404, "Không tìm thấy tác vụ")
+    return resumed
+
+
+@app.post("/api/jobs/{jid}/restart-current")
+def restart_current_job(jid: str, data: dict):
+    version = data.get("state_version") if isinstance(data, dict) else None
+    if not isinstance(version, int) or isinstance(version, bool):
+        raise HTTPException(422, "Cần state_version hiện tại để tạo tác vụ.")
+    with jobs.LOCK:
+        original = jobs.JOBS.get(jid)
+    if original is None:
+        raise HTTPException(404, "Không tìm thấy tác vụ")
+    with original._commit_lock:
+        if jobs.reconcile_commit(original)["state"] != "uncommitted":
+            raise HTTPException(409, "Cần hoàn tất xác minh commit trước khi tạo tác vụ khác.")
+        with original._state_lock:
+            if original.state_version != version or not _can_restart_current(original):
+                raise HTTPException(409, "Tác vụ đã đổi hoặc không hỗ trợ tạo lại từ bản hiện tại.")
+            if original._future and not original._future.done():
+                raise HTTPException(409, "Worker trước chưa dừng.")
+        payload = original.payload.copy()
+        with store.LOCK:
+            current = store.read(original.pid)
+        if original.kind == "render":
+            report = preflight(current, store.project_dir(current.id))
+            if not report["ok"]:
+                raise HTTPException(400, detail=report)
+        config = _job_config_fingerprint(original.kind)
+        with jobs.LOCK, store.LOCK:
+            if jobs.busy(current.id):
+                raise HTTPException(409, "Dự án đang có tác vụ khác. Chờ hoàn tất trước khi tạo tác vụ.")
+            replacement = jobs.reserve(current.id, original.kind, payload=payload,
+                snapshot=current.model_dump(), config_fingerprint=config)
+            replacement.parent_job_id = original.id
+            jobs._persist(replacement)
+            with original._state_lock:
+                original.result = {"replacement_job_id": replacement.id}
+                original.message = "Đã tạo tác vụ từ bản hiện tại; checkpoint của tác vụ cũ được giữ lại."
+                original.updated_at = store.now()
+                original.state_version += 1
+                jobs._persist(original)
+            return jobs.launch(replacement)
+
+
+@app.post("/api/jobs/{jid}/retry-unknown")
+def retry_unknown_job(jid: str, data: dict):
+    if not isinstance(data, dict) or data.get("confirm_cost") is not True:
+        raise HTTPException(422, "Cần xác nhận rằng gửi lại có thể phát sinh phí thêm.")
+    expected_state_version = data.get("state_version")
+    if not isinstance(expected_state_version, int) or isinstance(expected_state_version, bool):
+        raise HTTPException(422, "Cần state_version hiện tại để xác nhận.")
+    with jobs.LOCK:
+        existing = jobs.JOBS.get(jid)
+        if not existing:
+            raise HTTPException(404, "Không tìm thấy tác vụ")
+        kind = existing.kind
+    try:
+        authorized = jobs.authorize_unknown_retry(jid, expected_state_version)
+        if authorized is None:
+            raise HTTPException(404, "Không tìm thấy tác vụ")
+        return jobs.resume_render(jid, authorized["state_version"], _job_config_fingerprint(kind))
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @app.post("/api/jobs/{jid}/cancel")
@@ -933,6 +1458,17 @@ def cancel(jid: str):
     if not j:
         raise HTTPException(404, "Không tìm thấy tác vụ")
     return j
+
+
+@app.post("/api/jobs/{jid}/promote")
+def promote_job(jid: str):
+    try:
+        promoted = jobs.promote(jid)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if not promoted:
+        raise HTTPException(404, "Không tìm thấy tác vụ")
+    return promoted
 
 
 def _ai_candidate(project: Project, request: AIApplyRequest) -> Project:
@@ -1002,14 +1538,15 @@ def assistant(pid: str, action: Action):
                 409, "Dự án đã thay đổi. Tải lại trước khi gửi yêu cầu AI."
             )
 
-        def work(job):
-            job.update(10, "AI đang đề xuất chỉnh sửa")
-            result = providers.assistant(base, action.prompt, job)
-            result["revision"] = base.revision
-            result["proposal_id"] = job.id
-            return result
-
-        return jobs.submit(pid, "assistant", work)
+        job = jobs.reserve(
+            pid,
+            "assistant",
+            payload={"prompt_fingerprint": job_store.fingerprint(action.prompt)},
+            snapshot=base.model_dump(),
+            config_fingerprint=_job_config_fingerprint("assistant"),
+        )
+        _ASSISTANT_INPUTS[job.id] = action.prompt
+        return jobs.launch(job)
 
 
 @app.post("/api/projects/{pid}/assistant-preview")
@@ -1070,8 +1607,6 @@ def apply_ai(pid: str, request: AIApplyCommit):
 
 @app.post("/api/demo")
 def create_demo():
-    from .demo import build_demo
-
     p = store.save(
         Project(
             name="Một chút bình yên",
@@ -1080,13 +1615,7 @@ def create_demo():
         )
     )
 
-    def op(job):
-        fresh = build_demo(store.read(p.id), job)
-        job.check()
-        job.commit(lambda: store.save(fresh))
-        return {"project_id": p.id}
-
-    return {"project": p, "job": jobs.submit(p.id, "demo", op)}
+    return {"project": p, "job": jobs.submit(p.id, "demo", {}, p.model_dump())}
 
 
 FRONTEND = Path(__file__).resolve().parents[1] / "frontend" / "dist"

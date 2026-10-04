@@ -1,0 +1,54 @@
+{
+  "captured_at": "2026-10-02",
+  "timezone": "Asia/Saigon",
+  "source": {
+    "sha256_backend_frontend": "9243ffd2c09c80493c9d0be61e5933a31667c59ef9067bbcd9df657b28d61c92",
+    "git_head": "ee6b862de49f68fd18e81397e2b44adf2c52660c"
+  },
+  "environment": {
+    "os": "Windows 11 build 26200",
+    "cpu": "Intel64 Family 6 Model 141 Stepping 1, GenuineIntel",
+    "logical_cpu_count": 12,
+    "physical_memory_gb": 15.8,
+    "python": "3.13.7",
+    "node": "v24.14.0",
+    "npm": "11.9.0",
+    "ffmpeg": "7.1",
+    "imageio_ffmpeg": "0.6.0",
+    "fastapi": "0.141.1",
+    "react": "19.3.0",
+    "vite": "7.3.6",
+    "requirements_lock_sha256": "91004176b86ee755c8d4a5b8302afcf0d1529bd82dfd2b8dc6df67ef1e966a13",
+    "frontend_package_lock_sha256": "c391fff131de849db74a8c40a6514ce99c75746850c05f74d3e7e4db3b543bb9"
+  },
+  "workload": {
+    "input": "testsrc2, 240x426, 15 fps, 60 seconds, H.264 ultrafast CRF 30",
+    "analysis": "backend.media.analyze default settings",
+    "render": "one 5-second portrait preview, 720-wide, H.264/AAC",
+    "data_and_outputs": "temporary directory"
+  },
+  "measurements": {
+    "generate_input_seconds": 1.5,
+    "generate_peak_process_tree_mb": 111.4,
+    "analyze_seconds": 2.63,
+    "analyze_peak_process_tree_mb": 92.7,
+    "detected_scene_count": 20,
+    "thumbnail_count": 20,
+    "thumbnail_bytes": 229012,
+    "cache_bytes": 0,
+    "cold_render_seconds": 10.71,
+    "cold_render_peak_process_tree_mb": 324.4,
+    "cold_render_output_bytes": 480834,
+    "cold_render_encoder": "h264_qsv",
+    "warm_render_seconds": 4.39,
+    "warm_render_peak_process_tree_mb": 328.5,
+    "warm_clip_cache_hits": 1,
+    "warm_clip_cache_misses": 0,
+    "export_tree_bytes_after_cleanup": 986290
+  },
+  "limits": [
+    "Một lần đo trên workload tổng hợp; không phải cam kết hiệu năng.",
+    "Không đo scheduler p95, disconnect detection, resume, hay hủy FFmpeg.",
+    "Không dùng video thật hoặc giọng đọc tiếng Việt tự nhiên."
+  ]
+}

@@ -23,6 +23,45 @@ function changedPath(before, after, path = '') {
   return result;
 }
 
+function canRebase(base, current, server) {
+  const metadata = new Set([
+    'revision',
+    'content_revision',
+    'updated_at',
+    'created_at',
+    'job_commit_tokens',
+  ]);
+  // Match entities by ID, since a worker may reorder clips/assets while the
+  // editor changes a field. Index-based paths could hide a real collision.
+  const changes = (before, after, path = '') => {
+    if (JSON.stringify(before) === JSON.stringify(after)) return [];
+    if (Array.isArray(before) && Array.isArray(after)) {
+      if ([...before, ...after].every((item) => item && typeof item === 'object' && item.id)) {
+        const old = new Map(before.map((item) => [item.id, item]));
+        const next = new Map(after.map((item) => [item.id, item]));
+        const result = [...new Set([...old.keys(), ...next.keys()])].flatMap((id) =>
+          changes(old.get(id), next.get(id), `${path}.${encodeURIComponent(id)}`),
+        );
+        const retained = before.filter((item) => next.has(item.id)).map((item) => item.id);
+        const reordered = after.filter((item) => old.has(item.id)).map((item) => item.id);
+        if (JSON.stringify(retained) !== JSON.stringify(reordered)) result.push(`${path}.$order`);
+        return result;
+      }
+      return [path];
+    }
+    if (before && after && typeof before === 'object' && typeof after === 'object') {
+      return [...new Set([...Object.keys(before), ...Object.keys(after)])].flatMap((key) =>
+        changes(before[key], after[key], path ? `${path}.${key}` : key),
+      );
+    }
+    return [path];
+  };
+  const paths = (value) => changes(base, value).filter((path) => !metadata.has(path.split('.')[0]));
+  return !paths(current).some((a) =>
+    paths(server).some((b) => a === b || a.startsWith(`${b}.`) || b.startsWith(`${a}.`)),
+  );
+}
+
 export function useProjectSession() {
   const [p, setPState] = useState(null);
   const [dirty, setDirtyState] = useState(false);
@@ -35,11 +74,23 @@ export function useProjectSession() {
   const inFlightRef = useRef(new Map());
   const operationRef = useRef(null);
   const conflictRef = useRef(null);
+  const baseRef = useRef(null);
+  const openRequestRef = useRef(0);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      ++openRequestRef.current;
+    };
+  }, []);
 
   const setP = useCallback((value) => {
     const next = typeof value === 'function' ? value(pRef.current) : value;
     pRef.current = next;
     setPState(next);
+    if (!dirtyRef.current) baseRef.current = clone(next);
   }, []);
 
   const clearConflict = useCallback(() => {
@@ -56,6 +107,7 @@ export function useProjectSession() {
         setSaveStatus('draft');
       } else {
         const project = pRef.current;
+        baseRef.current = clone(project);
         if (project) removeDraft(project.id);
         setSaveStatus('saved');
         clearConflict();
@@ -133,6 +185,20 @@ export function useProjectSession() {
             saveDraft(retained, operationRef.current);
             try {
               const latest = await api(`/projects/${snapshot.id}`);
+              if (!mountedRef.current || pRef.current?.id !== snapshot.id) throw error;
+              if (
+                latest.revision > snapshot.revision &&
+                baseRef.current &&
+                canRebase(baseRef.current, pRef.current, latest)
+              ) {
+                const rebased = rebaseChanges(baseRef.current, pRef.current, latest);
+                baseRef.current = clone(latest);
+                pRef.current = rebased;
+                setPState(rebased);
+                saveDraft(rebased, operationRef.current);
+                setSaveStatus('draft');
+                continue;
+              }
               const draft = {
                 project: pRef.current?.id === snapshot.id ? pRef.current : snapshot,
                 baseRevision: snapshot.revision,
@@ -142,12 +208,13 @@ export function useProjectSession() {
               setConflictState(draft);
               setSaveStatus('conflict');
             } catch {
+              if (!mountedRef.current || pRef.current?.id !== snapshot.id) throw error;
               const draft = { project: retained, baseRevision: snapshot.revision, server: null };
               conflictRef.current = draft;
               setConflictState(draft);
               setSaveStatus('conflict');
             }
-          } else {
+          } else if (mountedRef.current && pRef.current?.id === snapshot.id) {
             setSaveStatus('draft');
           }
           throw error;
@@ -157,7 +224,12 @@ export function useProjectSession() {
         removeSavedDrafts(snapshot);
 
         const current = pRef.current;
-        if (current?.id === snapshot.id) {
+        if (
+          mountedRef.current &&
+          saved.revision >= current?.revision &&
+          current?.id === snapshot.id
+        ) {
+          baseRef.current = clone(saved);
           if (generationRef.current === generation) {
             pRef.current = saved;
             setPState(saved);
@@ -182,6 +254,7 @@ export function useProjectSession() {
             local.project.revision = saved.revision;
             saveDraft(local.project, operationRef.current);
           }
+          if (!mountedRef.current || current?.id !== snapshot.id) return saved;
         }
         // A caller starting a job or changing projects must wait until the latest
         // generation is on disk. Autosave shares this same single-flight path.
@@ -192,11 +265,14 @@ export function useProjectSession() {
 
   const open = useCallback(
     async (id) => {
+      const request = ++openRequestRef.current;
       if (dirtyRef.current) {
         const saved = await save();
-        if (!saved) return null;
+        if (!saved || request !== openRequestRef.current) return null;
       }
       const server = await api('/projects/' + id);
+      if (!mountedRef.current || request !== openRequestRef.current) return null;
+      baseRef.current = clone(server);
       const draft = readDraft(id);
       generationRef.current += 1;
       setEditedGeneration(generationRef.current);
@@ -247,6 +323,13 @@ export function useProjectSession() {
     const currentConflict = conflictRef.current;
     if (!currentConflict) return;
     const latest = await api(`/projects/${currentConflict.project.id}`);
+    if (
+      !mountedRef.current ||
+      conflictRef.current !== currentConflict ||
+      pRef.current?.id !== latest.id
+    )
+      return;
+    baseRef.current = clone(latest);
     removeDraft(latest.id);
     generationRef.current += 1;
     setEditedGeneration(generationRef.current);
@@ -258,6 +341,52 @@ export function useProjectSession() {
     setSaveStatus('saved');
     clearConflict();
   }, [clearConflict]);
+
+  const syncJobResult = useCallback(async (pid) => {
+    const request = openRequestRef.current;
+    const valid = () =>
+      mountedRef.current && request === openRequestRef.current && pRef.current?.id === pid;
+    if (!valid() || conflictRef.current) return null;
+    // Do not race a PUT: it may normalize fields or already contain this result.
+    const saving = inFlightRef.current.get(pid);
+    if (saving) {
+      try {
+        await saving;
+      } catch {
+        return null;
+      }
+      if (!valid() || conflictRef.current) return null;
+    }
+    const server = await api(`/projects/${pid}`);
+    if (!valid()) return null;
+    const current = pRef.current;
+    if (server.revision < current.revision) return null;
+    if (dirtyRef.current) {
+      const base = baseRef.current;
+      if (!base || base.id !== pid) return null;
+      if (JSON.stringify(base) === JSON.stringify(server)) return current;
+      if (!canRebase(base, current, server)) {
+        const details = { project: current, baseRevision: base.revision, server };
+        conflictRef.current = details;
+        setConflictState(details);
+        setSaveStatus('conflict');
+        saveDraft(current, operationRef.current);
+        return null;
+      }
+      const merged = rebaseChanges(base, current, server);
+      baseRef.current = clone(server);
+      pRef.current = merged;
+      setPState(merged);
+      generationRef.current += 1;
+      setEditedGeneration(generationRef.current);
+      saveDraft(merged, operationRef.current);
+      return merged;
+    }
+    baseRef.current = clone(server);
+    pRef.current = server;
+    setPState(server);
+    return server;
+  }, []);
 
   useEffect(() => {
     if (!dirty || conflict) return undefined;
@@ -281,5 +410,6 @@ export function useProjectSession() {
     loadLatest,
     pRef,
     dirtyRef,
+    syncJobResult,
   };
 }

@@ -11,6 +11,7 @@ from backend.main import app
 from backend.models import Asset, Clip, Cue, Project, Scene
 from backend.preflight import preflight
 from backend.timeline_math import clip_starts, timeline_duration
+from tests.fixtures.job_helpers import wait_for_job
 
 
 @pytest.fixture
@@ -116,7 +117,7 @@ def test_checkbox_setting_persists_and_filter_job_commits_atomically(isolated,mo
         assert client.put(f'/api/projects/{p.id}',json=data).status_code==200
         assert not client.get(f'/api/projects/{p.id}/preflight').json()['ok']
         response=client.post(f'/api/projects/{p.id}/filter-faces')
-        job=jobs.JOBS[response.json()['id']];job._future.result(timeout=15)
+        job=jobs.JOBS[response.json()['id']];wait_for_job(job)
         assert job.status=='done',job.message
         saved=store.read(p.id)
         assert saved.avoid_faces and saved.clips[0].asset_id==saved.assets[1].id
@@ -146,7 +147,8 @@ def test_render_aac_has_real_time_sample_clock(isolated,monkeypatch,tracks):
     path=store.project_dir(p.id)/'exports'/result['id']/result['filename']
     with av.open(str(path)) as container:
         pts=[packet.pts for packet in container.demux(audio=0) if packet.size and packet.pts is not None]
-    assert len(pts)==math.ceil(5*48000/1024)+1
+    expected_packets=math.ceil(5*48000/1024)+(result['audio_encoder']!='aac_mf')
+    assert len(pts)==expected_packets
     assert all(right-left==1024 for left,right in zip(pts,pts[1:]))
     with av.open(str(path)) as container:
         samples=sum(frame.samples for frame in container.decode(audio=0))

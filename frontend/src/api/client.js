@@ -1,22 +1,77 @@
 export async function api(path, body, method, extra = {}) {
-  const opts = { method: method || (body === undefined ? 'GET' : 'POST'), ...extra };
+  const { timeoutMs = 15000, signal: callerSignal, ...requestOptions } = extra;
+  const controller = new AbortController();
+  let timedOut = false;
+  const abortFromCaller = () => controller.abort(callerSignal?.reason);
+  if (callerSignal?.aborted) abortFromCaller();
+  else callerSignal?.addEventListener('abort', abortFromCaller, { once: true });
+  const timer =
+    Number.isFinite(timeoutMs) && timeoutMs > 0
+      ? setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+        }, timeoutMs)
+      : null;
+  const opts = {
+    ...requestOptions,
+    signal: controller.signal,
+    method: method || (body === undefined ? 'GET' : 'POST'),
+  };
   if (body !== undefined) {
     opts.body = body instanceof FormData ? body : JSON.stringify(body);
     if (!(body instanceof FormData)) {
-      opts.headers = { 'Content-Type': 'application/json', ...extra.headers };
+      opts.headers = { 'Content-Type': 'application/json', ...requestOptions.headers };
     }
   }
-  const response = await fetch('/api' + path, opts);
-  const data = await response.json();
-  if (!response.ok) {
+  try {
+    const response = await fetch('/api' + path, opts);
+    if (response.status === 204) return null;
+    const raw = await response.text();
+    let data = null;
+    if (raw) {
+      try {
+        data = JSON.parse(raw);
+      } catch {
+        data = { detail: raw.slice(0, 800) };
+      }
+    }
+    if (!response.ok) {
+      const detail = data?.detail ?? data;
+      const error = new Error(
+        typeof detail === 'string'
+          ? detail
+          : detail?.message || JSON.stringify(detail || `HTTP ${response.status}`),
+      );
+      error.status = response.status;
+      error.detail = detail;
+      error.code = detail?.code || data?.code;
+      error.category = detail?.category || data?.category;
+      error.retryable = detail?.retryable === true;
+      error.diagnosticId = detail?.diagnostic_id;
+      throw error;
+    }
+    return data;
+  } catch (cause) {
+    if (cause?.status) throw cause;
+    if (timedOut) {
+      const error = new Error(
+        'ClipForge phản hồi quá chậm. Trạng thái gần nhất được giữ lại và sẽ đồng bộ lại.',
+      );
+      error.code = 'REQUEST_TIMEOUT';
+      error.cause = cause;
+      throw error;
+    }
+    if (callerSignal?.aborted || cause?.name === 'AbortError') throw cause;
     const error = new Error(
-      typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail || data),
+      'Không kết nối được với ClipForge. Kiểm tra ứng dụng rồi thử đồng bộ lại.',
     );
-    error.status = response.status;
-    error.detail = data.detail;
+    error.code = 'NETWORK_ERROR';
+    error.cause = cause;
     throw error;
+  } finally {
+    if (timer) clearTimeout(timer);
+    callerSignal?.removeEventListener('abort', abortFromCaller);
   }
-  return data;
 }
 
 export function uploadWithProgress(path, form, onProgress, signal) {

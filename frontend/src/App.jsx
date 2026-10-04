@@ -12,6 +12,7 @@ import {
   KeyRound,
   LayoutTemplate,
   Library,
+  ListTodo,
   Loader2,
   Mic2,
   PanelLeftClose,
@@ -41,7 +42,9 @@ import {
 import { StoragePanel, TemplateLibrary } from './components/ManagementPanels.jsx';
 import { Preview } from './components/Preview.jsx';
 import { SettingsModal } from './components/SettingsModal.jsx';
+import { TaskCenter } from './components/TaskCenter.jsx';
 import { Timeline } from './components/Timeline.jsx';
+import { useJobEvents } from './hooks/useJobEvents.js';
 import { useJobs } from './hooks/useJobs.js';
 import { usePreviewState } from './hooks/usePreviewState.js';
 import { useProjectSession } from './hooks/useProjectSession.js';
@@ -95,7 +98,8 @@ export default function App() {
   const { jobs, setJobs, active, cancel: cancelJob } = useJobs(p?.id);
   const { preview, setPreview, play, setPlay, cursor, setCursor } = usePreviewState();
   const uploadAbort = useRef(null),
-    jobSeen = useRef(new Set());
+    openRequest = useRef(0),
+    openingProject = useRef(false);
   const loadProjects = () =>
     api('/projects').then((list) => {
       setProjects(list);
@@ -182,21 +186,26 @@ export default function App() {
     }
   };
   const open = async (id) => {
-    const project = await openProject(id);
-    if (!project) return null;
-    const pastJobs = await api('/jobs?pid=' + id);
-    pastJobs
-      .filter((j) => ['done', 'error', 'cancelled', 'interrupted'].includes(j.status))
-      .forEach((j) => jobSeen.current.add(j.id));
-    localStorage.setItem('clipforge-project', id);
-    setJobs(pastJobs);
-    setSelected(0);
-    setCursor(0);
-    setPreview(null);
-    setPreflight(null);
-    setProposal(null);
-    setPlay(false);
-    return project;
+    const request = ++openRequest.current;
+    openingProject.current = true;
+    try {
+      const project = await openProject(id);
+      if (!project || request !== openRequest.current) return null;
+      const pastJobs = await api('/jobs?pid=' + id);
+      if (request !== openRequest.current || pRef.current?.id !== id) return null;
+      rememberJobs(pastJobs, project);
+      localStorage.setItem('clipforge-project', id);
+      setJobs(pastJobs);
+      setSelected(0);
+      setCursor(0);
+      setPreview(null);
+      setPreflight(null);
+      setProposal(null);
+      setPlay(false);
+      return project;
+    } finally {
+      if (request === openRequest.current) openingProject.current = false;
+    }
   };
   const openManagement = async (view) => {
     if (dirtyRef.current && !(await save())) return;
@@ -258,7 +267,7 @@ export default function App() {
     }
   };
   const edit = (fn) => {
-    if (busy || active) return;
+    if (busy || projectMutationJob) return;
     editProject(fn);
     setPreflight(null);
     setPlay(false);
@@ -295,60 +304,47 @@ export default function App() {
       setToast('Đã chuyển cấu hình sang dùng biến môi trường');
       return next;
     });
-  useEffect(() => {
-    if (!p?.id) return;
-    const pid = p.id;
-    for (const j of jobs) {
-      if (
-        !['done', 'error', 'cancelled', 'interrupted'].includes(j.status) ||
-        jobSeen.current.has(j.id)
-      )
-        continue;
-      jobSeen.current.add(j.id);
-      if (j.status === 'error' || j.status === 'interrupted') setError(j.message);
-      if (j.status === 'done') {
-        if (j.kind === 'assistant') setProposal(j.result);
-        else if (!dirtyRef.current) {
-          api('/projects/' + pid)
-            .then((updated) => {
-              if (pRef.current?.id !== pid || dirtyRef.current) return;
-              setP(updated);
-              if (j.kind === 'upload' && j.result?.auto_assemble) {
-                setPlay(false);
-                setPreview(null);
-                api(`/projects/${pid}/assemble-audio`, {})
-                  .then((nextJob) => {
-                    if (pRef.current?.id === pid) setJobs((old) => [...old, nextJob]);
-                  })
-                  .catch((e) => setError(e.message));
-              }
-              if (j.kind === 'render') {
-                setPreview(updated.exports.at(-1));
-                setPlay(false);
-              }
-              loadProjects();
-            })
-            .catch((e) => setError(e.message));
-        }
-        setToast(
-          'Đã hoàn tất ' +
-            ({
-              analyze: 'phân tích cảnh',
-              plan: 'lập timeline',
-              voice: 'tạo giọng',
-              template: 'phân tích mẫu',
-              render: 'xuất video',
-              transcribe: 'căn phụ đề',
-              demo: 'dự án mẫu',
-              assistant: 'đề xuất AI',
-              upload: 'nhập tư liệu',
-              'assemble-audio': 'dựng theo audio',
-              'filter-faces': 'lọc và thay cảnh có mặt',
-            }[j.kind] || ''),
-        );
-      }
-    }
-  }, [jobs, p?.id]);
+  const rememberJobs = useJobEvents({
+    enabled: !openingProject.current,
+    projectId: p?.id,
+    jobs,
+    dirty,
+    revision: p?.revision,
+    conflict,
+    pRef,
+    dirtyRef,
+    setP,
+    syncJobResult: session.syncJobResult,
+    onError: setError,
+    onProposal: setProposal,
+    onPreview: (item) => {
+      setPreview(item);
+      setPlay(false);
+    },
+    onAutoAssemble: (job) => {
+      setPlay(false);
+      setPreview(null);
+      setJobs((old) => (old.some((item) => item.id === job.id) ? old : [...old, job]));
+    },
+    onDone: (job) => {
+      setToast(
+        'Đã hoàn tất ' +
+          ({
+            analyze: 'phân tích cảnh',
+            plan: 'lập timeline',
+            voice: 'tạo giọng',
+            template: 'phân tích mẫu',
+            render: 'xuất video',
+            transcribe: 'căn phụ đề',
+            demo: 'dự án mẫu',
+            upload: 'nhập tư liệu',
+            'assemble-audio': 'dựng theo audio',
+            'filter-faces': 'lọc và thay cảnh có mặt',
+          }[job.kind] || 'tác vụ'),
+      );
+      loadProjects().catch((e) => setError(e.message));
+    },
+  });
   const run = (name, body = {}) =>
     safe(async () => {
       setPlay(false);
@@ -471,7 +467,10 @@ export default function App() {
       if (cursor > duration) setCursor(duration);
     }
   }, [p?.clips.length, duration]);
-  const locked = busy || !!active || !!conflict;
+  const projectMutationJob = jobs.find(
+    (job) => job.kind !== 'render' && ['queued', 'running', 'cancelling'].includes(job.status),
+  );
+  const locked = busy || !!projectMutationJob || !!conflict;
   const selectClip = (i, preserveCursor = false) => {
     setSelected(i);
     if (!preserveCursor) setCursor(clipStarts(p.clips)[i] || 0);
@@ -724,6 +723,9 @@ export default function App() {
           <Button small icon={HardDrive} onClick={() => openManagement('storage')}>
             Dung lượng
           </Button>
+          <Button small icon={ListTodo} onClick={() => openManagement('tasks')}>
+            Tác vụ
+          </Button>
           <Button small icon={Library} onClick={() => openManagement('templates')}>
             Template
           </Button>
@@ -840,6 +842,12 @@ export default function App() {
                   setToast('Đã xóa template');
                 })
               }
+            />
+          ) : managementView === 'tasks' ? (
+            <TaskCenter
+              onClose={() => setManagementView('')}
+              onOpenSettings={() => setShowSettings(true)}
+              onOpenStorage={() => setManagementView('storage')}
             />
           ) : !p ? (
             <div className="welcome">
@@ -1145,7 +1153,13 @@ export default function App() {
                   <Preview
                     {...{ p, selected, preview, play, setPlay, cursor, setCursor, duration }}
                     onSelect={setSelected}
-                    previewIsStale={!!preview && (dirty || preview.project_revision !== p.revision)}
+                    previewIsStale={
+                      !!preview &&
+                      (dirty ||
+                        (preview.source_revision != null
+                          ? preview.source_revision !== p.content_revision
+                          : preview.project_revision !== p.revision))
+                    }
                     onReturnLive={() => {
                       setPreview(null);
                       setPlay(false);

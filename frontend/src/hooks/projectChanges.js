@@ -10,11 +10,21 @@ export function rebaseChanges(before, after, saved) {
     if ([...before, ...after, ...saved].every((item) => object(item) && item.id)) {
       const original = new Map(before.map((item) => [item.id, item]));
       const normalized = new Map(saved.map((item) => [item.id, item]));
-      return after.map((item) =>
-        original.has(item.id) && normalized.has(item.id)
-          ? rebaseChanges(original.get(item.id), item, normalized.get(item.id))
-          : clone(item),
-      );
+      const edited = after
+        .filter((item) => !original.has(item.id) || normalized.has(item.id))
+        .map((item) =>
+          original.has(item.id) && normalized.has(item.id)
+            ? rebaseChanges(original.get(item.id), item, normalized.get(item.id))
+            : clone(item),
+        );
+      // A completed upload/job can add entities while a local field is edited.
+      // Preserve those additions as well as local deletions and ordering edits.
+      return [
+        ...edited,
+        ...saved
+          .filter((item) => !original.has(item.id) && !after.some((local) => local.id === item.id))
+          .map((item) => clone(item)),
+      ];
     }
     if (before.length === after.length && saved.length === before.length)
       return after.map((item, index) => rebaseChanges(before[index], item, saved[index]));

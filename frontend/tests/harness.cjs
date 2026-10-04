@@ -66,7 +66,7 @@ function harness() {
   };
 }
 
-function context(api, local = storage(), session = storage()) {
+function context(api, local = storage(), session = storage(), overrides = {}) {
   const h = harness(), modules = new Map(), timers = new Map(), listeners = new Map();
   let now = Date.UTC(2026, 9, 1), timerId = 0;
   const clock = {
@@ -91,8 +91,16 @@ function context(api, local = storage(), session = storage()) {
     addEventListener: (name, fn) => listeners.set(name, fn),
     removeEventListener: name => listeners.delete(name),
   };
+  const documentListeners = new Map();
+  const document = {
+    visibilityState: 'visible',
+    addEventListener: (name, fn) => documentListeners.set(name, fn),
+    removeEventListener: name => documentListeners.delete(name),
+  };
   function load(file) {
     const absolute = path.resolve(__dirname, '..', file);
+    const relative = path.relative(path.resolve(__dirname, '..'), absolute).replaceAll('\\', '/');
+    if (Object.hasOwn(overrides, relative)) return overrides[relative];
     if (modules.has(absolute)) return modules.get(absolute).exports;
     const js = esbuild.transformSync(fs.readFileSync(absolute, 'utf8'), {
       loader: absolute.endsWith('.jsx') ? 'jsx' : 'js', format: 'cjs', jsx: 'transform',
@@ -112,15 +120,15 @@ function context(api, local = storage(), session = storage()) {
     };
     new Function('require', 'module', 'exports', 'React', 'localStorage', 'sessionStorage',
       'setTimeout', 'clearTimeout', 'Date', 'window', 'crypto', 'ResizeObserver',
-      'requestAnimationFrame', 'cancelAnimationFrame', js)(
+      'requestAnimationFrame', 'cancelAnimationFrame', 'document', js)(
       req, module, module.exports, h.hooks, local, session,
       clock.setTimeout, clock.clearTimeout, ClockDate, window, webcrypto,
       class { observe() {} disconnect() {} },
-      fn => clock.setTimeout(() => fn(now), 16), clock.clearTimeout,
+      fn => clock.setTimeout(() => fn(now), 16), clock.clearTimeout, document,
     );
     return module.exports;
   }
-  return { h, local, session, clock, listeners, load };
+  return { h, local, session, clock, listeners, documentListeners, document, load };
 }
 
 function nodes(node, predicate, out = []) {

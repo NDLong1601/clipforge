@@ -1,11 +1,25 @@
-import hashlib, json, os, subprocess, time, shutil, math
+import hashlib, json, os, subprocess, time, shutil, math, threading
 from pathlib import Path
 import av, cv2, numpy as np
 from PIL import Image
 import imageio_ffmpeg
 from .models import Asset, Scene, uid
-from . import store
+from . import store, processes
+from .errors import ResourcePressure
 from .store import project_dir, asset_path
+
+_AUDIO_ENCODER_CACHE = {}
+
+
+def file_sha256(path):
+    path = Path(path).resolve()
+    # Recovery must see replacements even when size/mtime were preserved.
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    result = digest.hexdigest()
+    return result
 
 
 def ffmpeg():
@@ -16,34 +30,103 @@ def ffmpeg():
     )
 
 
-def run_ff(args, cwd=None, job=None, timeout=1800):
-    import tempfile
-
-    # File-backed stderr avoids pipe deadlocks during long encodes.
-    with tempfile.TemporaryFile() as err:
-        process = subprocess.Popen(
-            [ffmpeg(), "-hide_banner", "-nostdin", "-y", *map(str, args)],
-            cwd=cwd,
-            stdout=subprocess.DEVNULL,
-            stderr=err,
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-        )
-        started = time.monotonic()
+def audio_encoder():
+    """Select a fast native AAC encoder on Windows when FFmpeg provides it."""
+    executable = ffmpeg()
+    cached = _AUDIO_ENCODER_CACHE.get(executable)
+    if cached:
+        return cached
+    encoder = "aac"
+    if os.name == "nt":
         try:
-            while process.poll() is None:
-                if job:
-                    job.check()
-                if time.monotonic() - started > timeout:
-                    raise ValueError("FFmpeg vượt thời gian xử lý cho phép")
-                time.sleep(0.15)
-            if process.returncode:
-                err.seek(0)
-                tail = err.read().decode("utf-8", errors="replace")[-1800:]
-                raise ValueError("Không xử lý được media: " + tail)
-        except BaseException:
-            process.kill()
-            process.wait()
-            raise
+            result = processes.run(
+                [executable, "-hide_banner", "-encoders"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            if result.returncode == 0 and any(
+                len(fields := line.split()) > 1 and fields[1] == "aac_mf"
+                for line in result.stdout.splitlines()
+            ):
+                encoder = "aac_mf"
+        except (OSError, subprocess.SubprocessError):
+            pass
+    _AUDIO_ENCODER_CACHE[executable] = encoder
+    return encoder
+
+
+def run_ff(args, cwd=None, job=None, timeout=1800):
+    arguments = list(map(str, args))
+    duration = None
+    try:
+        if "-t" in arguments:
+            duration = float(arguments[len(arguments) - 1 - arguments[::-1].index("-t") + 1])
+        elif "-frames:v" in arguments and "-r" in arguments:
+            duration = float(arguments[arguments.index("-frames:v") + 1]) / float(arguments[arguments.index("-r") + 1])
+    except (ValueError, IndexError, ZeroDivisionError):
+        pass
+    if duration is not None and (not math.isfinite(duration) or duration <= 0):
+        duration = None
+    if job:
+        if not job.current_step:
+            job.start_step("ffmpeg")
+        else:
+            job.check_resources()
+    tail = bytearray()
+    sample = [0.0, 0]
+    drain_lock = threading.Lock()
+
+    def stderr_reader(stream):
+        while chunk := stream.read(4096):
+            with drain_lock:
+                tail.extend(chunk)
+                del tail[:-8192]
+
+    def progress_reader(stream):
+        while line := stream.readline(8192):
+            if line.startswith(b"out_time_us="):
+                try:
+                    seconds = max(0.0, int(line.partition(b"=")[2]) / 1_000_000)
+                    with drain_lock:
+                        sample[0] = max(sample[0], seconds)
+                        sample[1] += 1
+                except ValueError:
+                    pass
+
+    with processes.command(
+            [ffmpeg(), "-hide_banner", "-y", "-nostats", "-progress", "pipe:1", *arguments],
+            cwd=cwd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            popen_factory=subprocess.Popen,
+        ) as process:
+        process._stdout_thread = threading.Thread(target=progress_reader, args=(process.stdout,), name="clipforge-ff-progress", daemon=True)
+        process._stderr_thread = threading.Thread(target=stderr_reader, args=(process.stderr,), name="clipforge-ff-stderr", daemon=True)
+        process._stdout_thread.start()
+        process._stderr_thread.start()
+        started = time.monotonic()
+        last_update = started
+        while process.poll() is None:
+            if job:
+                job.check()
+                if time.monotonic() - last_update >= 0.5:
+                    with drain_lock:
+                        seconds, samples = sample
+                    if samples:
+                        job.update_encode_progress(seconds, duration, time.monotonic() - started, samples)
+                    last_update = time.monotonic()
+            if time.monotonic() - started > timeout:
+                raise ValueError("FFmpeg vượt thời gian xử lý cho phép")
+            time.sleep(0.15)
+        process._stdout_thread.join(timeout=5)
+        process._stderr_thread.join(timeout=5)
+        if job:
+            job.check_resources()
+        if process.returncode:
+            raise ValueError("Không xử lý được media: " + tail.decode("utf-8", errors="replace")[-1800:])
 
 
 def probe(path):
@@ -131,6 +214,7 @@ def register(pid, path, name, role, job=None, thumbnail_dir=None):
 
 
 ANALYSIS_VERSION = "scene-v5-display-rotation-normalized-pts-0.4s-hist32"
+ANALYSIS_CACHE_SCHEMA = 2
 
 
 def _frame_seconds(frame, fallback):
@@ -167,8 +251,9 @@ def _rotate_frame(frame, rotation):
 
 
 def _analysis_cache_path(asset, source):
-    stat = source.stat()
-    identity = f"{ANALYSIS_VERSION}|{asset.id}|{asset.filename}|{stat.st_size}|{stat.st_mtime_ns}"
+    identity = (
+        f"{ANALYSIS_VERSION}|{ANALYSIS_CACHE_SCHEMA}|{asset.id}|{asset.filename}|{file_sha256(source)}"
+    )
     key = hashlib.sha256(identity.encode()).hexdigest()
     return store.ROOT / "cache" / "scene-analysis" / f"{key}.json"
 
@@ -273,7 +358,7 @@ def _save_scene_thumbnail(pid, asset, scenes, job=None):
     except ValueError:
         raise
     except Exception as exc:
-        if job and job.cancelled.is_set():
+        if isinstance(exc, ResourcePressure) or job and job.cancelled.is_set():
             raise
         raise ValueError("Không tạo được thumbnail cảnh từ video") from exc
 
@@ -305,10 +390,18 @@ def refresh_scene_thumbnails(pid, asset, job=None):
 def _cached_scenes(pid, asset, cache_path, job=None):
     try:
         raw = json.loads(cache_path.read_text(encoding="utf-8"))
-        if raw.get("version") != ANALYSIS_VERSION:
+        if (not isinstance(raw, dict) or raw.get("version") != ANALYSIS_VERSION
+                or raw.get("schema_version") != ANALYSIS_CACHE_SCHEMA
+                or raw.get("asset_id") != asset.id or raw.get("duration") != asset.duration
+                or raw.get("source_sha256") != file_sha256(asset_path(pid, asset))):
             return None
         scenes = [Scene.model_validate(item) for item in raw.get("scenes", [])]
         if not scenes:
+            return None
+        if (len({scene.id for scene in scenes}) != len(scenes)
+                or any(scene.end > asset.duration + 0.05 for scene in scenes)
+                or any(first.end > second.start + 0.001 for first, second in zip(scenes, scenes[1:]))
+                or any(not scene.thumbnail or Path(scene.thumbnail).name != scene.thumbnail for scene in scenes)):
             return None
         thumb_root = project_dir(pid) / "thumbs"
         if any(not (thumb_root / scene.thumbnail).is_file() for scene in scenes):
@@ -318,10 +411,7 @@ def _cached_scenes(pid, asset, cache_path, job=None):
             try:
                 atomic(
                     cache_path,
-                    {
-                        "version": ANALYSIS_VERSION,
-                        "scenes": [scene.model_dump() for scene in scenes],
-                    },
+                    _scene_cache_value(pid, asset, scenes),
                 )
             except OSError:
                 pass
@@ -330,7 +420,16 @@ def _cached_scenes(pid, asset, cache_path, job=None):
         return None
 
 
+def _scene_cache_value(pid, asset, scenes):
+    return {"schema_version": ANALYSIS_CACHE_SCHEMA, "version": ANALYSIS_VERSION,
+        "asset_id": asset.id, "duration": asset.duration,
+        "source_sha256": file_sha256(asset_path(pid, asset)),
+        "scenes": [scene.model_dump() for scene in scenes]}
+
+
 def analyze(pid, asset, job=None):
+    if job:
+        job.start_step("analyze")
     if asset.media == "image":
         asset.scenes = [
             Scene(
@@ -401,7 +500,7 @@ def analyze(pid, asset, job=None):
     except ValueError:
         raise
     except Exception as exc:
-        if job and job.cancelled.is_set():
+        if isinstance(exc, ResourcePressure) or job and job.cancelled.is_set():
             raise
         raise ValueError("Không giải mã được video để phân tích cảnh") from exc
     cuts.append(asset.duration)
@@ -434,10 +533,7 @@ def analyze(pid, asset, job=None):
     try:
         atomic(
             cache_path,
-            {
-                "version": ANALYSIS_VERSION,
-                "scenes": [scene.model_dump() for scene in scenes],
-            },
+            _scene_cache_value(pid, asset, scenes),
         )
     except OSError:
         pass
@@ -455,8 +551,19 @@ def proxy_for_preview(pid, asset, job=None):
         return source
     if max(asset.width, asset.height) <= 1280 and stat.st_size < 200 * 1024 * 1024:
         return source
+    try:
+        with av.open(str(source)) as container:
+            video = next(iter(container.streams.video), None)
+            video_duration = (
+                float(video.duration * video.time_base)
+                if video and video.duration and video.time_base
+                else asset.duration
+            )
+    except Exception:
+        video_duration = asset.duration
+    padding_duration = max(0.0, asset.duration - video_duration)
     identity = (
-        f"proxy-v1|{asset.id}|{stat.st_size}|{stat.st_mtime_ns}|1280|libx264-crf30-vfr"
+        f"proxy-v3|{asset.id}|{stat.st_size}|{stat.st_mtime_ns}|{file_sha256(source)}|1280|libx264-crf30-vfr|{asset.duration}"
     )
     key = hashlib.sha256(identity.encode()).hexdigest()
     cache = store.ROOT / "cache" / "proxies" / f"{key}.mp4"
@@ -478,10 +585,15 @@ def proxy_for_preview(pid, asset, job=None):
                 "-i",
                 source,
                 "-vf",
-                "scale=1280:1280:force_original_aspect_ratio=decrease:force_divisible_by=2",
+                "scale=1280:1280:force_original_aspect_ratio=decrease:force_divisible_by=2"
+                + (
+                    f",tpad=stop_mode=clone:stop_duration={padding_duration:.9f}"
+                    if padding_duration > 0.001
+                    else ""
+                ),
                 "-an",
-                "-vsync",
-                "0",
+                "-fps_mode",
+                "passthrough",
                 "-c:v",
                 "libx264",
                 "-preset",

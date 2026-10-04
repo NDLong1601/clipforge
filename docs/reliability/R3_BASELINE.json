@@ -1,0 +1,174 @@
+{
+  "date": "2026-10-03",
+  "timezone": "Asia/Saigon",
+  "milestone": "R3",
+  "status": "complete",
+  "release_ready": false,
+  "closed_findings": [
+    "F6",
+    "F7"
+  ],
+  "cumulative_closed_findings": [
+    "F1",
+    "F2",
+    "F3",
+    "F4",
+    "F6",
+    "F7"
+  ],
+  "r3_regressions": {
+    "cases": 66,
+    "passed": 66,
+    "file": "tests/test_reliability_r3.py",
+    "native_media_executed": true
+  },
+  "r3_components": {
+    "cases": 2,
+    "passed": 2,
+    "file": "frontend/tests/reliabilityR3.test.cjs"
+  },
+  "source_snapshot": {
+    "head": "ee6b862de49f68fd18e81397e2b44adf2c52660c",
+    "entries": 180,
+    "files": 173,
+    "deleted_paths": 7,
+    "archive_sha256": "f9ceac6a46081741a9ac838c6526a77e9061c1ac3202a48454244a2e8ccc69a2",
+    "directory": "review/reliability-r3/source-baseline"
+  },
+  "environment": {
+    "os": "Windows-11-10.0.26200-SP0",
+    "python": "3.13.7 (tags/v3.13.7:bcee1c3, Aug 14 2025, 14:15:11) [MSC v.1944 64 bit (AMD64)]",
+    "interpreter": "C:\\Users\\PC\\Documents\\clipforge\\.venv\\Scripts\\python.exe",
+    "node": "v24.14.0",
+    "psutil_installed": false,
+    "packages": {
+      "pytest": "9.1.1",
+      "fastapi": "0.141.1",
+      "av": "18.1.0",
+      "imageio-ffmpeg": "0.6.0",
+      "psutil": null
+    },
+    "ffmpeg": "ffmpeg version N-125875-g5d4d3bdc61-20260731 Copyright (c) 2000-2026 the FFmpeg developers"
+  },
+  "backend": {
+    "passed": 330,
+    "xfailed": 2,
+    "unexpected_failures": 0
+  },
+  "frontend": {
+    "tests": 40,
+    "pass": 31,
+    "fail": 0,
+    "skipped": 0,
+    "todo": 9
+  },
+  "known_red_findings": {
+    "F8": 2,
+    "F5": 3,
+    "F9": 6
+  },
+  "baseline_valid": true,
+  "red_baseline_valid": true,
+  "steps": [
+    {
+      "name": "backend-tests",
+      "command": [
+        "C:\\Users\\PC\\Documents\\clipforge\\.venv\\Scripts\\python.exe",
+        "-m",
+        "pytest",
+        "-q",
+        "--junitxml=C:\\Users\\PC\\Documents\\clipforge\\review\\reliability-r3\\baseline\\backend-tests.xml"
+      ],
+      "exit_code": 0,
+      "expected_exit_code": 0,
+      "seconds": 386.611,
+      "ok": true,
+      "log": "backend-tests.txt"
+    },
+    {
+      "name": "backend-red",
+      "command": [
+        "C:\\Users\\PC\\Documents\\clipforge\\.venv\\Scripts\\python.exe",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/test_reliability_r0.py",
+        "tests/test_reliability_r0_process.py",
+        "--runxfail",
+        "--junitxml=C:\\Users\\PC\\Documents\\clipforge\\review\\reliability-r3\\baseline\\backend-red.xml"
+      ],
+      "exit_code": 1,
+      "expected_exit_code": 1,
+      "seconds": 37.759,
+      "ok": true,
+      "log": "backend-red.txt"
+    },
+    {
+      "name": "frontend-tests",
+      "command": [
+        "C:\\Program Files\\nodejs\\node.EXE",
+        "--test",
+        "--test-reporter=tap"
+      ],
+      "exit_code": 0,
+      "expected_exit_code": 0,
+      "seconds": 0.676,
+      "ok": true,
+      "log": "frontend-tests.txt"
+    },
+    {
+      "name": "frontend-red",
+      "command": [
+        "C:\\Program Files\\nodejs\\node.EXE",
+        "--test",
+        "--test-reporter=tap",
+        "tests/reliabilityR0.test.cjs"
+      ],
+      "exit_code": 1,
+      "expected_exit_code": 1,
+      "seconds": 0.689,
+      "ok": true,
+      "log": "frontend-red.txt"
+    },
+    {
+      "name": "frontend-lint",
+      "command": [
+        "C:\\Program Files\\nodejs\\npm.cmd",
+        "run",
+        "lint"
+      ],
+      "exit_code": 0,
+      "expected_exit_code": 0,
+      "seconds": 1.009,
+      "ok": true,
+      "log": "frontend-lint.txt"
+    },
+    {
+      "name": "frontend-build",
+      "command": [
+        "C:\\Program Files\\nodejs\\node.EXE",
+        "node_modules/vite/bin/vite.js",
+        "build",
+        "--outDir",
+        "C:\\Users\\PC\\AppData\\Local\\Temp\\clipforge-r0-build-9gf29dvq\\dist",
+        "--emptyOutDir"
+      ],
+      "exit_code": 0,
+      "expected_exit_code": 0,
+      "seconds": 3.203,
+      "ok": true,
+      "log": "frontend-build.txt"
+    }
+  ],
+  "started_at": "2026-10-03T15:49:37.176901+00:00",
+  "finished_at": "2026-10-03T15:56:47.571035+00:00",
+  "artifacts": "review/reliability-r3/baseline",
+  "preservation_check": "review/reliability-r3/preservation-check.json",
+  "patch": "review/reliability-r3/R3.patch",
+  "limits": [
+    "Native FFmpeg/PyAV and real routing with HTTP mock tested on development Windows 11; no clean VM or paid provider calls.",
+    "Two independent TestClients and mounted TaskCenter components tested; no full browser E2E.",
+    "Older config/cache identities can require manual creation of a task from the current project; runtime handlers without a persisted config fingerprint have no durable config contract.",
+    "No large-media benchmark rerun after switching to fresh content hashes; F5/F9 and F8 remain open for R4 and R5."
+  ]
+}

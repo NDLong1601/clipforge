@@ -1,0 +1,111 @@
+{
+  "date": "2026-10-03",
+  "timezone": "Asia/Saigon",
+  "milestone": "R0",
+  "status": "complete",
+  "release_ready": false,
+  "source_snapshot": {
+    "head": "ee6b862de49f68fd18e81397e2b44adf2c52660c",
+    "files": 160,
+    "archive_sha256": "373c1ae19115d20e3cdb67814c65b04a6401a22b19ce8d6b4c98bbbb642178d4",
+    "directory": "review/reliability-r0/source-baseline"
+  },
+  "environment": {
+    "os": "Windows-11-10.0.26200-SP0",
+    "python": "3.13.7 (tags/v3.13.7:bcee1c3, Aug 14 2025, 14:15:11) [MSC v.1944 64 bit (AMD64)]",
+    "interpreter": "C:\\Users\\PC\\Documents\\clipforge\\.venv\\Scripts\\python.exe",
+    "node": "v24.14.0",
+    "psutil_installed": false,
+    "packages": {
+      "pytest": "9.1.1",
+      "fastapi": "0.141.1",
+      "av": "18.1.0",
+      "imageio-ffmpeg": "0.6.0",
+      "psutil": null
+    },
+    "ffmpeg": "ffmpeg version N-125875-g5d4d3bdc61-20260731 Copyright (c) 2000-2026 the FFmpeg developers"
+  },
+  "backend": {
+    "passed": 163,
+    "xfailed": 12,
+    "unexpected_failures": 0
+  },
+  "frontend": {
+    "tests": 34,
+    "pass": 25,
+    "fail": 0,
+    "skipped": 0,
+    "todo": 9
+  },
+  "known_red_findings": {
+    "F1": 3,
+    "F2": 1,
+    "F4": 1,
+    "F6": 2,
+    "F7": 2,
+    "F8": 2,
+    "F3": 1,
+    "F5": 3,
+    "F9": 6
+  },
+  "baseline_valid": true,
+  "red_baseline_valid": true,
+  "steps": [
+    {
+      "name": "backend-tests",
+      "exit_code": 0,
+      "expected_exit_code": 0,
+      "seconds": 318.107,
+      "ok": true,
+      "log": "backend-tests.txt"
+    },
+    {
+      "name": "backend-red",
+      "exit_code": 1,
+      "expected_exit_code": 1,
+      "seconds": 41.674,
+      "ok": true,
+      "log": "backend-red.txt"
+    },
+    {
+      "name": "frontend-tests",
+      "exit_code": 0,
+      "expected_exit_code": 0,
+      "seconds": 1.179,
+      "ok": true,
+      "log": "frontend-tests.txt"
+    },
+    {
+      "name": "frontend-red",
+      "exit_code": 1,
+      "expected_exit_code": 1,
+      "seconds": 1.013,
+      "ok": true,
+      "log": "frontend-red.txt"
+    },
+    {
+      "name": "frontend-lint",
+      "exit_code": 0,
+      "expected_exit_code": 0,
+      "seconds": 3.055,
+      "ok": true,
+      "log": "frontend-lint.txt"
+    },
+    {
+      "name": "frontend-build",
+      "exit_code": 0,
+      "expected_exit_code": 0,
+      "seconds": 15.932,
+      "ok": true,
+      "log": "frontend-build.txt"
+    }
+  ],
+  "logs_directory": "review/reliability-r0/baseline",
+  "limits": [
+    "component harness only; no browser E2E",
+    "development Windows only; no clean VM/ZIP install",
+    "mock RAM shortage; no real constrained disk volume",
+    "no real paid provider or natural Vietnamese voice",
+    "R1-R5 fixes and R6 acceptance remain outstanding"
+  ]
+}

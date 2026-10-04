@@ -41,7 +41,7 @@ def test_cancel_upload_cleans_stage_and_preserves_cancel_exception():
         async def is_disconnected(self): return True
     upload_file=UploadFile(filename='sample.png',file=io.BytesIO(b'data'),size=4)
     with pytest.raises(jobs.Cancelled):
-        asyncio.run(main.upload(Disconnected(),p.id,[upload_file],'source'))
+        asyncio.run(main.upload(Disconnected(),p.id,[upload_file],'source',False))
     assert not any((store.ROOT/'staging').rglob('*.png'))
 
 
@@ -252,7 +252,7 @@ def test_upload_cleanup_survives_failure_to_persist_cancelled_status(monkeypatch
     monkeypatch.setattr(jobs, '_persist', fail_cancelled_status)
     upload_file = UploadFile(filename='sample.png', file=io.BytesIO(b'data'), size=4)
     with pytest.raises(jobs.Cancelled):
-        asyncio.run(main.upload(Disconnected(), p.id, [upload_file], 'source'))
+        asyncio.run(main.upload(Disconnected(), p.id, [upload_file], 'source', False))
     assert not any((store.ROOT / 'staging').rglob('*.png'))
     assert not jobs.busy(p.id)
 
@@ -273,7 +273,7 @@ def test_upload_disk_error_is_persisted_without_partial_media(monkeypatch):
     monkeypatch.setattr(main.anyio.to_thread, 'run_sync', fail_write)
     upload_file = UploadFile(filename='sample.png', file=io.BytesIO(b'data'), size=4)
     with pytest.raises(OSError, match='disk full'):
-        asyncio.run(main.upload(Connected(), p.id, [upload_file], 'source'))
+        asyncio.run(main.upload(Connected(), p.id, [upload_file], 'source', False))
     record = json.loads(next((store.ROOT / 'jobs').glob('*.json')).read_text(encoding='utf-8'))
     assert record['status'] == 'error'
     assert record['message'] == 'disk full'

@@ -34,7 +34,7 @@ def assemble(p, job):
         else:
             media.refresh_scene_thumbnails(p.id, asset, job)
     try:
-        providers.ai_candidates(store.settings())
+        providers.ai_candidates(providers.effective_settings(job))
         use_ai = True
     except ValueError:
         use_ai = False

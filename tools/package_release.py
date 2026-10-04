@@ -15,7 +15,6 @@ ROOT_FILES = (
     "VALIDATION.md",
     "RELEASE_NOTES.md",
     "THIRD_PARTY.md",
-    "IMPLEMENTATION_PLAN.md",
     "launch.py",
     "MO_CLIPFORGE.bat",
     "START.bat",
@@ -28,6 +27,7 @@ ROOT_FILES = (
     "frontend/package-lock.json",
     "frontend/vite.config.js",
     "frontend/biome.json",
+    "frontend/playwright.config.cjs",
 )
 SOURCE_DIRS = (
     "backend",
@@ -35,9 +35,11 @@ SOURCE_DIRS = (
     "frontend/public",
     "frontend/dist",
     "frontend/tests",
+    "frontend/e2e",
     "licenses",
     "tests",
     "tools",
+    "docs/reliability",
 )
 EXCLUDED_DIRS = {
     ".git",
@@ -79,18 +81,26 @@ def _release_files() -> list[Path]:
     )
 
 
-def build_release(output: Path | None = None) -> tuple[Path, str]:
+def build_release(output: Path | None = None, *, frontend_dist: Path | None = None) -> tuple[Path, str]:
     output = (output or ROOT / "release" / f"ClipForge-{VERSION}-source.zip").resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_name(output.name + ".tmp")
     entries = _release_files()
+    replacement_dist = Path(frontend_dist).resolve() if frontend_dist is not None else None
+    if replacement_dist is not None and not (replacement_dist / "index.html").is_file():
+        raise FileNotFoundError("The verified frontend build is missing index.html")
+    if replacement_dist is not None:
+        entries = [path for path in entries if not path.relative_to(ROOT).as_posix().startswith("frontend/dist/")]
+    payloads = [(path.relative_to(ROOT).as_posix(), path) for path in entries]
+    if replacement_dist is not None:
+        payloads += [("frontend/dist/" + path.relative_to(replacement_dist).as_posix(), path)
+                     for path in replacement_dist.rglob("*") if path.is_file() and not path.is_symlink()]
     records = []
     try:
         with zipfile.ZipFile(
             temporary, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9
         ) as archive:
-            for path in entries:
-                relative = path.relative_to(ROOT).as_posix()
+            for relative, path in sorted(payloads):
                 archive_name = f"{ARCHIVE_ROOT}/{relative}"
                 content = path.read_bytes()
                 archive.writestr(archive_name, content)

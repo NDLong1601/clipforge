@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "id": "render-job-0002",
+  "pid": "project-0000000002",
+  "kind": "render",
+  "operation_version": 1,
+  "payload": {
+    "preview": true,
+    "profile_ref": "render-profile-default",
+    "profile_fingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "input_revision": 12,
+  "input_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "snapshot_ref": "job_runs/render-job-0002/snapshot.json",
+  "attempt": 1,
+  "state_version": 4,
+  "status": "interrupted",
+  "progress": 48,
+  "phase": "interrupted",
+  "steps": [
+    {"id": "preflight", "status": "done", "result_ref": "checkpoints/preflight.json", "sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
+    {"id": "clip:0001", "status": "done", "result_ref": "artifacts/clip-0001.mp4", "sha256": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},
+    {"id": "clip:0002", "status": "running"}
+  ],
+  "blocked_reason": null,
+  "error": null,
+  "commit_token": null,
+  "parent_job_id": null,
+  "created_at": "2026-10-02T08:00:00Z",
+  "updated_at": "2026-10-02T08:04:00Z",
+  "expected_resume_capability": "checkpointed",
+  "expected_resume_plan": {"reuse": ["preflight", "clip:0001"], "rerun": ["clip:0002"], "ai_calls_possible": false}
+}

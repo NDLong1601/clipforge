@@ -8,6 +8,7 @@
     "build": "vite build",
     "preview": "vite preview --host 127.0.0.1",
     "test": "node --test",
+    "test:e2e": "playwright test --config playwright.config.cjs",
     "lint": "biome check src/App.jsx src/main.jsx src/timelineMath.js src/previewMedia.js src/templateContent.js src/api src/hooks src/components",
     "format": "biome format --write src/App.jsx src/main.jsx src/timelineMath.js src/previewMedia.js src/api src/hooks src/components"
   },
@@ -19,6 +20,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.14",
+    "@playwright/test": "1.63.0",
     "@vitejs/plugin-react": "^4.5.0",
     "vite": "^7.0.0"
   }

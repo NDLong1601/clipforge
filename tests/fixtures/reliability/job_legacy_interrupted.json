@@ -1,0 +1,14 @@
+{
+  "id": "legacy-job-0001",
+  "pid": "project-0000000001",
+  "kind": "render",
+  "status": "interrupted",
+  "progress": 42,
+  "phase": "interrupted",
+  "message": "Ứng dụng đã đóng khi tác vụ đang xử lý.",
+  "created_at": "2026-10-01T10:00:00Z",
+  "updated_at": "2026-10-01T10:04:00Z",
+  "provider_calls": [],
+  "expected_resume_capability": "restart_only",
+  "expected_behavior": "Show the old job and require an explicit restart from current input; do not label it resumable."
+}

@@ -2,8 +2,10 @@ import base64, json, re, os, subprocess, html, hashlib, time
 from pathlib import Path
 import httpx
 from .models import Cue, Asset, Template, uid, AIProposal, SceneLabels, TextRegion
-from .store import settings, project_dir, asset_path
+from .store import ROOT, settings, project_dir, asset_path
 from .media import probe, run_ff, extract_audio, register
+from .errors import ProviderOutcomeUnknown, ResourcePressure
+from .job_inputs import endpoint_id
 
 
 def checked(response):
@@ -46,19 +48,48 @@ def ai_endpoint(profile):
 
 
 def _endpoint_id(profile):
-    from urllib.parse import urlsplit, urlunsplit
+    from .job_inputs import endpoint_id
+    return endpoint_id(ai_endpoint(profile))
 
-    parts = urlsplit(ai_endpoint(profile))
-    endpoint = urlunsplit(
-        (
-            parts.scheme.casefold(),
-            parts.netloc.casefold(),
-            parts.path.rstrip("/"),
-            parts.query,
-            "",
-        )
-    )
-    return hashlib.sha256(endpoint.encode()).hexdigest()
+
+def effective_settings(job=None):
+    frozen = getattr(job, "_settings", None)
+    return frozen if frozen is not None else settings()
+
+
+def _cached_cues(value, duration):
+    from .job_inputs import TRANSCRIPTION_VERSION
+    try:
+        if (not isinstance(value, dict) or value.get("schema_version") != TRANSCRIPTION_VERSION
+                or value.get("duration") != duration or not isinstance(value.get("cues"), list)
+                or value.get("provider") not in (None, "openai", "gemini", "local")
+                or not 1 <= len(value["cues"]) <= 1000):
+            return None
+        cues = [Cue.model_validate(item) for item in value["cues"]]
+        if (any(not cue.text.strip() or cue.end > duration + 0.25 for cue in cues)
+                or any(first.start > second.start for first, second in zip(cues, cues[1:]))
+                or sum(len(cue.text) + 1 for cue in cues) > 12000):
+            return None
+        return cues
+    except (ValueError, TypeError, KeyError):
+        return None
+
+
+def _cue_result(cues, duration, **metadata):
+    from .job_inputs import TRANSCRIPTION_VERSION
+    value = {"schema_version": TRANSCRIPTION_VERSION, "duration": duration,
+        "cues": [cue.model_dump() for cue in cues], **metadata}
+    if _cached_cues(value, duration) is None:
+        raise ValueError("Kết quả nhận dạng có mốc thời gian hoặc schema không hợp lệ")
+    return value
+
+
+def _provider_cached_cues(value, duration):
+    from .errors import InputBlocked
+    cues = _cached_cues(value, duration)
+    if cues is None:
+        raise InputBlocked("CHECKPOINT_INVALID", "Kết quả ASR đã lưu không còn hợp lệ; không tự gửi lại yêu cầu có phí.")
+    return cues
 
 
 def _label_cache_key(provider, model, endpoint_id, instruction, image_hash):
@@ -130,7 +161,7 @@ def ai_json(
     return_route=False,
     job=None,
 ):
-    s = settings()
+    s = effective_settings(job)
     candidates = ai_candidates(s, profile_id, allow_fallback)
     content = [{"type": "text", "text": prompt}]
     for path in images or []:
@@ -147,6 +178,8 @@ def ai_json(
             }
         )
     failures = []
+    provider_attempt_budget = 4
+    provider_attempts = 0
     for profile in candidates:
         if job:
             job.check()
@@ -166,14 +199,34 @@ def ai_json(
         if profile.provider == "openai":
             body["response_format"] = {"type": "json_object"}
         attempt = 0
-        while attempt < 2:
+        while attempt < 2 and provider_attempts < provider_attempt_budget:
             if job:
                 job.check()
             attempt += 1
             started = time.monotonic()
             response = None
             usage = None
+            call_id = None
+            if job:
+                from . import job_store
+
+                request_fingerprint = job_store.fingerprint({
+                    "provider": profile.provider,
+                    "model": profile.model,
+                    "endpoint_id": _endpoint_id(profile),
+                    "body": body,
+                    "operation": "ai-json-v1",
+                })
+                call_id, cached_call = job.begin_provider_call(
+                    request_fingerprint, profile.provider, profile.model, "ai-json"
+                )
+                if cached_call is not None:
+                    cached_result = cached_call.get("result")
+                    cached_route = cached_call.get("route")
+                    if isinstance(cached_result, dict):
+                        return (cached_result, cached_route) if return_route else cached_result
             try:
+                provider_attempts += 1
                 with httpx.Client(timeout=httpx.Timeout(90, connect=8)) as client:
                     response = client.post(
                         url + "/chat/completions",
@@ -187,10 +240,19 @@ def ai_json(
                 # A sent provider request may finish after cancellation. Do not issue
                 # another provider request or apply its result once cancellation lands.
                 usage = None if response.is_error else _usage(response)
+                response_pressure = None
                 if job:
                     try:
                         job.check()
+                    except ResourcePressure as exc:
+                        # Preserve an already-paid response before stopping. The
+                        # post-save check below still prevents applying it.
+                        if response.is_error:
+                            job.finish_provider_call(call_id, "failed_known", response.status_code)
+                            raise
+                        response_pressure = exc
                     except Exception:
+                        job.finish_provider_call(call_id, "completed_cancelled", response.status_code)
                         _record_provider_call(
                             job,
                             profile,
@@ -207,6 +269,8 @@ def ai_json(
                         response.status_code in (408, 425, 429)
                         or response.status_code >= 500
                     )
+                    if job:
+                        job.finish_provider_call(call_id, "failed_known", response.status_code)
                     _record_provider_call(
                         job,
                         profile,
@@ -261,6 +325,8 @@ def ai_json(
                     "usage": usage,
                     "total_usage": total_usage or None,
                 }
+                if job:
+                    job.complete_provider_call(call_id, {"result": result, "route": route})
                 _record_provider_call(
                     job,
                     profile,
@@ -271,9 +337,17 @@ def ai_json(
                     response.status_code,
                     usage,
                 )
+                if response_pressure is not None:
+                    raise response_pressure
+                if job:
+                    job.check()
                 return (result, route) if return_route else result
             except httpx.TimeoutException:
                 reason = "hết thời gian chờ"
+                if job:
+                    message = "Không xác định được kết quả từ dịch vụ AI. Gửi lại có thể phát sinh phí thêm."
+                    job.mark_provider_unknown(call_id, message)
+                    raise ProviderOutcomeUnknown(message) from None
                 _record_provider_call(
                     job,
                     profile,
@@ -285,6 +359,10 @@ def ai_json(
                 retry = True
             except httpx.RequestError:
                 reason = "lỗi mạng"
+                if job:
+                    message = "Không xác định được kết quả từ dịch vụ AI sau lỗi mạng. Gửi lại có thể phát sinh phí thêm."
+                    job.mark_provider_unknown(call_id, message)
+                    raise ProviderOutcomeUnknown(message) from None
                 _record_provider_call(
                     job,
                     profile,
@@ -296,6 +374,12 @@ def ai_json(
                 retry = True
             except (ValueError, KeyError, TypeError, IndexError):
                 reason = "phản hồi JSON không hợp lệ"
+                if job:
+                    job.finish_provider_call(
+                        call_id,
+                        "invalid_response",
+                        response.status_code if response is not None else None,
+                    )
                 _record_provider_call(
                     job,
                     profile,
@@ -355,7 +439,7 @@ def label_scenes(p, job):
         "Không có chữ chèn thì text_regions=[]. "
         'JSON {"scenes":[{"index":0,"tags":"...","text_regions":[{"x":100,"y":800,"w":800,"h":120}]}]}.'
     )
-    enabled = ai_candidates(settings())
+    enabled = ai_candidates(effective_settings(job))
     pending = []
     cache_root = project_dir(p.id).parent.parent / "cache" / "ai-labels"
     cache_root.mkdir(parents=True, exist_ok=True)
@@ -403,9 +487,25 @@ def label_scenes(p, job):
     for start in range(0, len(pending), 6):
         job.update(35 + 50 * start / max(1, len(pending)), "AI đang mô tả các cảnh")
         group = pending[start : start + 6]
-        result, route = ai_json(
-            instruction, [item[2] for item in group], job=job, return_route=True
-        )
+        from . import job_store
+
+        batch_fingerprint = job_store.fingerprint({
+            "images": [item[3] for item in group],
+            "instruction": instruction,
+            "config": job.config_fingerprint,
+            "version": 1,
+        })
+        cached_batch = job.load_checkpoint(f"scene-label-batch:{start:04d}", batch_fingerprint)
+        if isinstance(cached_batch, dict) and isinstance(cached_batch.get("result"), dict):
+            result, route = cached_batch["result"], cached_batch.get("route", {})
+        else:
+            result, route = ai_json(
+                instruction, [item[2] for item in group], job=job, return_route=True
+            )
+            job.save_checkpoint(f"scene-label-batch:{start:04d}", batch_fingerprint, {
+                "result": result,
+                "route": route,
+            })
         labels = SceneLabels.model_validate(_normalized_text_labels(result)).scenes
         if {entry["index"] for entry in labels} != set(range(len(group))):
             raise ValueError(
@@ -472,31 +572,55 @@ def speak_sentence(text, dest, s, job):
     job.check()
     if s.tts_provider == "openai":
         base_url, key = audio_connection(s)
-        with httpx.Client(timeout=120) as client:
-            r = checked(
-                client.post(
+        body = {
+            "model": s.tts_model,
+            "voice": s.tts_voice,
+            "input": text,
+            "response_format": "wav",
+            "speed": s.tts_speed,
+        }
+        request_fingerprint = __import__("hashlib").sha256(
+            json.dumps({"provider": "openai-tts", "endpoint_id": endpoint_id(base_url), "body": body},
+                       ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        call_id, cached = job.begin_provider_call(request_fingerprint, "openai", s.tts_model, "tts")
+        if cached is not None:
+            _restore_provider_audio(cached, dest, job, call_id)
+            return
+        try:
+            with httpx.Client(timeout=120) as client:
+                r = client.post(
                     base_url + "/audio/speech",
                     headers={"Authorization": "Bearer " + key},
-                    json={
-                        "model": s.tts_model,
-                        "voice": s.tts_voice,
-                        "input": text,
-                        "response_format": "wav",
-                        "speed": s.tts_speed,
-                    },
+                    json=body,
                 )
-            )
-            dest.write_bytes(r.content)
+        except httpx.RequestError:
+            message = "Không xác định được kết quả TTS. Gửi lại có thể phát sinh phí thêm."
+            job.mark_provider_unknown(call_id, message)
+            raise ProviderOutcomeUnknown(message) from None
+        if r.is_error:
+            job.finish_provider_call(call_id, "failed_known", r.status_code)
+            checked(r)
+        _publish_provider_audio(r.content, dest, job, call_id)
     elif s.tts_provider == "azure":
         if not s.azure_key:
             raise ValueError("Cần Azure Speech key để tạo giọng tiếng Việt")
         if not re.fullmatch("[a-z0-9-]+", s.azure_region):
             raise ValueError("Azure region không hợp lệ")
         ssml = f'<speak version="1.0" xml:lang="vi-VN"><voice name="{html.escape(s.azure_voice,quote=True)}"><prosody rate="{s.tts_speed:.2f}">{html.escape(text)}</prosody></voice></speak>'
-        with httpx.Client(timeout=120) as client:
-            r = checked(
-                client.post(
-                    f"https://{s.azure_region}.tts.speech.microsoft.com/cognitiveservices/v1",
+        tts_url = f"https://{s.azure_region}.tts.speech.microsoft.com/cognitiveservices/v1"
+        request_fingerprint = __import__("hashlib").sha256(
+            json.dumps({"provider": "azure-tts", "url": tts_url, "ssml": ssml},
+                       ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        call_id, cached = job.begin_provider_call(request_fingerprint, "azure", s.azure_voice, "tts")
+        if cached is not None:
+            _restore_provider_audio(cached, dest, job, call_id)
+            return
+        try:
+            with httpx.Client(timeout=120) as client:
+                r = client.post(
+                    tts_url,
                     headers={
                         "Ocp-Apim-Subscription-Key": s.azure_key,
                         "Content-Type": "application/ssml+xml",
@@ -504,8 +628,14 @@ def speak_sentence(text, dest, s, job):
                     },
                     content=ssml.encode(),
                 )
-            )
-            dest.write_bytes(r.content)
+        except httpx.RequestError:
+            message = "Không xác định được kết quả TTS. Gửi lại có thể phát sinh phí thêm."
+            job.mark_provider_unknown(call_id, message)
+            raise ProviderOutcomeUnknown(message) from None
+        if r.is_error:
+            job.finish_provider_call(call_id, "failed_known", r.status_code)
+            checked(r)
+        _publish_provider_audio(r.content, dest, job, call_id)
     else:
         if os.name != "nt":
             raise ValueError("Giọng Windows chỉ dùng trên Windows")
@@ -537,7 +667,8 @@ $speech.Dispose()
 """,
             encoding="utf-8-sig",
         )
-        result = subprocess.run(
+        from . import processes
+        result = processes.run(
             [
                 "powershell.exe",
                 "-NoProfile",
@@ -550,6 +681,7 @@ $speech.Dispose()
             capture_output=True,
             timeout=120,
             creationflags=subprocess.CREATE_NO_WINDOW,
+            job=job,
         )
         config.unlink(missing_ok=True)
         ps.unlink(missing_ok=True)
@@ -558,24 +690,118 @@ $speech.Dispose()
     job.check()
 
 
+def _publish_provider_audio(content: bytes, dest: Path, job, call_id: str):
+    from .media import file_sha256
+
+    if len(content) <= 44:
+        job.finish_provider_call(call_id, "invalid_response")
+        raise ValueError("Dịch vụ TTS trả về audio rỗng hoặc không hợp lệ.")
+    temporary = dest.with_name(f".{dest.name}.{job.id}.provider.tmp")
+    temporary.write_bytes(content)
+    if not probe(temporary).get("has_audio", False):
+        temporary.unlink(missing_ok=True)
+        job.finish_provider_call(call_id, "invalid_response")
+        raise ValueError("Dịch vụ TTS trả về audio không giải mã được.")
+    os.replace(temporary, dest)
+    job.complete_provider_call(call_id, {
+        "artifact_path": dest.resolve().relative_to(ROOT.resolve()).as_posix(),
+        "sha256": file_sha256(dest),
+        "size": dest.stat().st_size,
+    })
+
+
+def _restore_provider_audio(cached: dict, dest: Path, job, call_id: str):
+    from .media import file_sha256
+
+    relative = cached.get("artifact_path")
+    if not isinstance(relative, str):
+        message = "Kết quả TTS đã lưu không còn file audio; cần xác nhận thử lại."
+        job.mark_provider_unknown(call_id, message, invalid_result=True)
+        raise ProviderOutcomeUnknown(message)
+    path = (ROOT / relative).resolve()
+    base = ROOT.resolve()
+    if path != base and base not in path.parents:
+        raise ValueError("Đường dẫn audio TTS nằm ngoài vùng dữ liệu")
+    if not path.is_file() or file_sha256(path) != cached.get("sha256"):
+        message = "File audio TTS đã lưu bị thiếu hoặc đổi; cần xác nhận thử lại."
+        job.mark_provider_unknown(call_id, message, invalid_result=True)
+        raise ProviderOutcomeUnknown(message)
+    temporary = dest.with_name(f".{dest.name}.restore.tmp")
+    temporary.write_bytes(path.read_bytes())
+    os.replace(temporary, dest)
+
+
 def synthesize(p, job):
+    from .job_inputs import config_identity
     parts = sentences(p.script)
     if not parts:
         raise ValueError("Nhập kịch bản trước khi tạo giọng")
     if len(p.script) > 6000:
         raise ValueError("Kịch bản tạo giọng tối đa 6.000 ký tự")
-    s = settings()
+    s = effective_settings(job)
     d = project_dir(p.id) / "cache" / job.id
     d.mkdir(parents=True, exist_ok=True)
+    from . import job_store
+    from .media import file_sha256
+
     cues = []
     total = 0
     for i, text in enumerate(parts):
         job.update(5 + 75 * i / len(parts), f"Tạo giọng câu {i+1}/{len(parts)}")
         wav = d / f"speech_{i:03d}.wav"
-        speak_sentence(text, wav, s, job)
         normalized = d / f"part_{i:03d}.wav"
-        run_ff(["-i", wav, "-ar", "48000", "-ac", "2", normalized], job=job)
-        duration = probe(normalized)["duration"]
+        fingerprint = job_store.fingerprint({
+            "index": i,
+            "text": text,
+            "provider": s.tts_provider,
+            "model": s.tts_model,
+            "voice": s.tts_voice,
+            "speed": s.tts_speed,
+            "azure_region": s.azure_region,
+            "azure_voice": s.azure_voice,
+            "windows_voice": s.windows_voice,
+            "job_config": job.config_fingerprint,
+            "endpoint_config": config_identity("voice", s),
+            "version": 2,
+        })
+        checkpoint = job.load_checkpoint(f"tts-sentence:{i:03d}", fingerprint)
+        valid = False
+        if isinstance(checkpoint, dict):
+            try:
+                valid = (
+                    file_sha256(normalized) == checkpoint.get("sha256")
+                    and abs(probe(normalized)["duration"] - checkpoint["duration"]) < 0.02
+                )
+            except (OSError, ValueError, KeyError, TypeError):
+                valid = False
+        if valid:
+            duration = checkpoint["duration"]
+        else:
+            normalized_temp = d / f".part_{i:03d}.{job.id}.part.wav"
+            normalized_temp.unlink(missing_ok=True)
+            raw_checkpoint = job.load_checkpoint(f"tts-raw:{i:03d}", fingerprint)
+            speech_valid = False
+            if isinstance(raw_checkpoint, dict) and wav.is_file():
+                try:
+                    speech_valid = (file_sha256(wav) == raw_checkpoint.get("sha256")
+                        and probe(wav).get("has_audio", False))
+                except (OSError, ValueError):
+                    speech_valid = False
+            if not speech_valid:
+                wav.unlink(missing_ok=True)
+                speak_sentence(text, wav, s, job)
+                job.save_checkpoint(f"tts-raw:{i:03d}", fingerprint, {"sha256": file_sha256(wav)})
+            if not wav.is_file() or wav.stat().st_size <= 44:
+                raise ValueError(f"TTS không tạo được file cho câu {i + 1}.")
+            run_ff(["-i", wav, "-ar", "48000", "-ac", "2", normalized_temp], job=job)
+            duration = probe(normalized_temp)["duration"]
+            if duration <= 0:
+                raise ValueError(f"Audio chuẩn hóa cho câu {i + 1} không hợp lệ.")
+            os.replace(normalized_temp, normalized)
+            job.save_checkpoint(f"tts-sentence:{i:03d}", fingerprint, {
+                "duration": duration,
+                "sha256": file_sha256(normalized),
+            })
         cues.append(Cue(start=total, end=total + duration, text=text))
         total += duration
     if total > 180:
@@ -584,7 +810,7 @@ def synthesize(p, job):
         "\n".join(f"file 'part_{i:03d}.wav'" for i in range(len(parts))),
         encoding="utf-8",
     )
-    out = project_dir(p.id) / "assets" / f"{uid()}.wav"
+    out = project_dir(p.id) / "assets" / f"tts_{job.id}.wav"
     out.parent.mkdir(parents=True, exist_ok=True)
     run_ff(
         ["-f", "concat", "-safe", "0", "-i", "list.txt", "-c:a", "pcm_s16le", out],
@@ -676,8 +902,23 @@ def _gemini_audio(wav, duration, s, job):
     }
     for index, profile in enumerate(profiles):
         for attempt in range(1, 3):
+            if index * 2 + attempt > 4:
+                break
             job.check()
             started = time.monotonic()
+            from . import job_store
+
+            request_fingerprint = job_store.fingerprint({
+                "provider": "gemini-asr",
+                "model": profile.model,
+                "payload": payload,
+                "version": 1,
+            })
+            call_id, cached = job.begin_provider_call(
+                request_fingerprint, "gemini", profile.model, "transcription"
+            )
+            if cached is not None:
+                return _provider_cached_cues(cached, duration)
             try:
                 with httpx.Client(timeout=240) as client:
                     response = client.post(
@@ -698,7 +939,10 @@ def _gemini_audio(wav, duration, s, job):
                     status_code=response.status_code,
                 )
                 if response.status_code in (429, 500, 502, 503, 504) and attempt < 2:
+                    job.finish_provider_call(call_id, "failed_known", response.status_code)
                     continue
+                if response.is_error:
+                    job.finish_provider_call(call_id, "failed_known", response.status_code)
                 checked(response)
                 candidates = response.json().get("candidates", [])
                 parts = (
@@ -732,27 +976,57 @@ def _gemini_audio(wav, duration, s, job):
                     cue.end = min(duration, cue.end)
                     cue.text = cue.text.strip()
                     cues.append(cue)
+                job.complete_provider_call(call_id, _cue_result(cues, duration))
                 return cues
             except httpx.RequestError:
-                _record_provider_call(
-                    job, profile, index > 0, attempt, started, "network_error"
-                )
-                if attempt == 2 and index == len(profiles) - 1:
-                    raise ValueError(
-                        "Không kết nối được Gemini để phân tích audio."
-                    ) from None
+                message = "Không xác định được kết quả nhận dạng audio từ Gemini. Gửi lại có thể phát sinh phí thêm."
+                job.mark_provider_unknown(call_id, message)
+                raise ProviderOutcomeUnknown(message) from None
             except (ValueError, KeyError, TypeError, IndexError):
+                job.finish_provider_call(call_id, "invalid_response")
                 if index == len(profiles) - 1:
                     raise ValueError(
                         "Gemini không trả lời đọc/mốc audio hợp lệ. Kiểm tra API hoặc thử nhận dạng lại."
                     ) from None
                 break
+    raise ValueError("Hết ngân sách thử lại Gemini để phân tích audio.")
 
 
 def transcribe(p, asset, job):
     if not asset.has_audio:
         raise ValueError("Tư liệu đã chọn không có âm thanh.")
-    s = settings()
+    s = effective_settings(job)
+    source_path = asset_path(p.id, asset)
+    from . import job_store
+    from .media import file_sha256
+
+    from .job_inputs import config_identity, TRANSCRIPTION_VERSION
+    transcription_fingerprint = job_store.fingerprint({
+        "asset_id": asset.id,
+        "source_sha256": file_sha256(source_path),
+        "provider": s.transcription_provider,
+        "model": s.transcription_model,
+        "local_model": s.local_whisper_model,
+        "language": s.language,
+        "job_config": job.config_fingerprint,
+        "endpoint_config": config_identity("transcribe", s),
+        "version": TRANSCRIPTION_VERSION,
+    })
+    cached = job.load_checkpoint("transcription", transcription_fingerprint)
+    cached_cues = _cached_cues(cached, asset.duration)
+    if cached_cues is not None:
+        cues = cached_cues
+        provider = cached.get("provider", s.transcription_provider)
+        if cues:
+            p.cues = cues
+            p.cue_timing = "audio_segments" if provider == "gemini" else "transcribed"
+            p.voice_id = asset.id
+            p.cues_edited = False
+            p.cues_stale = False
+            p.script = " ".join(c.text for c in cues)
+            if asset.duration > p.target_duration:
+                p.target_duration = min(180, asset.duration)
+            return p
     d = project_dir(p.id) / "cache" / job.id
     d.mkdir(parents=True, exist_ok=True)
     wav = d / "audio.wav"
@@ -803,31 +1077,54 @@ def transcribe(p, asset, job):
             raise ValueError(
                 "Âm thanh quá lớn. Chỉ nhận dạng voice của video đầu ra, tối đa khoảng 12 phút."
             )
-        with httpx.Client(timeout=240) as client, wav.open("rb") as f:
-            r = checked(
-                client.post(
-                    base_url + "/audio/transcriptions",
-                    headers={"Authorization": "Bearer " + key},
-                    files={"file": ("audio.wav", f, "audio/wav")},
-                    data={
-                        "model": s.transcription_model,
-                        "response_format": "verbose_json",
-                        "timestamp_granularities[]": "word",
-                        "language": s.language,
-                    },
+        from . import job_store
+
+        asr_fingerprint = job_store.fingerprint({
+            "provider": "openai-asr",
+            "endpoint_id": endpoint_id(base_url),
+            "model": s.transcription_model,
+            "language": s.language,
+            "audio_sha256": file_sha256(wav),
+            "version": 1,
+        })
+        call_id, cached_asr = job.begin_provider_call(
+            asr_fingerprint, "openai", s.transcription_model, "transcription"
+        )
+        if cached_asr is not None:
+            cues = _provider_cached_cues(cached_asr, asset.duration)
+        else:
+            try:
+                with httpx.Client(timeout=240) as client, wav.open("rb") as f:
+                    r = client.post(
+                        base_url + "/audio/transcriptions",
+                        headers={"Authorization": "Bearer " + key},
+                        files={"file": ("audio.wav", f, "audio/wav")},
+                        data={
+                            "model": s.transcription_model,
+                            "response_format": "verbose_json",
+                            "timestamp_granularities[]": "word",
+                            "language": s.language,
+                        },
+                    )
+            except httpx.RequestError:
+                message = "Không xác định được kết quả nhận dạng audio. Gửi lại có thể phát sinh phí thêm."
+                job.mark_provider_unknown(call_id, message)
+                raise ProviderOutcomeUnknown(message) from None
+            if r.is_error:
+                job.finish_provider_call(call_id, "failed_known", r.status_code)
+                checked(r)
+            job.check()
+            data = r.json()
+            words = data.get("words") or data.get("segments") or []
+            cues = [
+                Cue(
+                    start=max(0, w["start"]),
+                    end=max(w["start"] + 0.02, w["end"]),
+                    text=w.get("word", w.get("text", "")).strip(),
                 )
-            )
-        job.check()
-        data = r.json()
-        words = data.get("words") or data.get("segments") or []
-        cues = [
-            Cue(
-                start=max(0, w["start"]),
-                end=max(w["start"] + 0.02, w["end"]),
-                text=w.get("word", w.get("text", "")).strip(),
-            )
-            for w in words
-        ]
+                for w in words
+            ]
+            job.complete_provider_call(call_id, _cue_result(cues, asset.duration))
     if not cues:
         raise ValueError(
             "Không nhận được lời nói trong audio. Chọn file giọng đọc rõ tiếng hoặc đổi bộ nhận dạng."
@@ -835,6 +1132,7 @@ def transcribe(p, asset, job):
     if sum(len(cue.text) + 1 for cue in cues) > 12000:
         raise ValueError("Lời đọc vượt giới hạn 12.000 ký tự.")
     job.check()
+    job.save_checkpoint("transcription", transcription_fingerprint, _cue_result(cues, asset.duration, provider=provider))
     p.cues = cues
     p.cue_timing = "audio_segments" if provider == "gemini" else "transcribed"
     p.voice_id = asset.id

@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "id": "voice-job-0003",
+  "pid": "project-0000000003",
+  "kind": "voice",
+  "operation_version": 1,
+  "payload": {
+    "voice_ref": "voice-profile-default",
+    "model_ref": "tts-model-default",
+    "script_fingerprint": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+  },
+  "input_revision": 8,
+  "input_fingerprint": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "snapshot_ref": "job_runs/voice-job-0003/snapshot.json",
+  "attempt": 1,
+  "state_version": 3,
+  "status": "blocked",
+  "progress": 20,
+  "phase": "provider_request",
+  "steps": [
+    {"id": "tts:0001", "status": "outcome_unknown", "request_fingerprint": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}
+  ],
+  "blocked_reason": {
+    "code": "PROVIDER_OUTCOME_UNKNOWN",
+    "message": "Yêu cầu trước có thể đã được xử lý. Gửi lại có thể tính phí thêm."
+  },
+  "error": {"code": "PROVIDER_OUTCOME_UNKNOWN", "retryable": false},
+  "commit_token": null,
+  "parent_job_id": null,
+  "expected_behavior": "Do not retry automatically; require an explicit user decision to send again. No API key, prompt, or transcript is stored."
+}

@@ -1,0 +1,162 @@
+{
+  "date": "2026-10-03",
+  "timezone": "Asia/Saigon",
+  "milestone": "R1",
+  "status": "complete",
+  "release_ready": false,
+  "closed_findings": [
+    "F1",
+    "F2"
+  ],
+  "r1_regressions": {
+    "cases": 66,
+    "passed": 66,
+    "file": "tests/test_reliability_r1.py"
+  },
+  "source_snapshot": {
+    "head": "ee6b862de49f68fd18e81397e2b44adf2c52660c",
+    "entries": 169,
+    "files": 162,
+    "deleted_paths": 7,
+    "archive_sha256": "dbc20fb69c1e4927a596e3905f7f9ae366828d3764de00887acb4468ea472d61",
+    "directory": "review/reliability-r1/source-baseline"
+  },
+  "environment": {
+    "os": "Windows-11-10.0.26200-SP0",
+    "python": "3.13.7 (tags/v3.13.7:bcee1c3, Aug 14 2025, 14:15:11) [MSC v.1944 64 bit (AMD64)]",
+    "interpreter": "C:\\Users\\PC\\Documents\\clipforge\\.venv\\Scripts\\python.exe",
+    "node": "v24.14.0",
+    "psutil_installed": false,
+    "packages": {
+      "pytest": "9.1.1",
+      "fastapi": "0.141.1",
+      "av": "18.1.0",
+      "imageio-ffmpeg": "0.6.0",
+      "psutil": null
+    },
+    "ffmpeg": "ffmpeg version N-125875-g5d4d3bdc61-20260731 Copyright (c) 2000-2026 the FFmpeg developers"
+  },
+  "backend": {
+    "passed": 233,
+    "xfailed": 8,
+    "unexpected_failures": 0
+  },
+  "frontend": {
+    "tests": 34,
+    "pass": 25,
+    "fail": 0,
+    "skipped": 0,
+    "todo": 9
+  },
+  "known_red_findings": {
+    "F4": 1,
+    "F6": 2,
+    "F7": 2,
+    "F8": 2,
+    "F3": 1,
+    "F5": 3,
+    "F9": 6
+  },
+  "baseline_valid": true,
+  "red_baseline_valid": true,
+  "steps": [
+    {
+      "name": "backend-tests",
+      "command": [
+        "C:\\Users\\PC\\Documents\\clipforge\\.venv\\Scripts\\python.exe",
+        "-m",
+        "pytest",
+        "-q",
+        "--junitxml=C:\\Users\\PC\\Documents\\clipforge\\review\\reliability-r1\\baseline\\backend-tests.xml"
+      ],
+      "exit_code": 0,
+      "expected_exit_code": 0,
+      "seconds": 232.139,
+      "ok": true,
+      "log": "backend-tests.txt"
+    },
+    {
+      "name": "backend-red",
+      "command": [
+        "C:\\Users\\PC\\Documents\\clipforge\\.venv\\Scripts\\python.exe",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/test_reliability_r0.py",
+        "tests/test_reliability_r0_process.py",
+        "--runxfail",
+        "--junitxml=C:\\Users\\PC\\Documents\\clipforge\\review\\reliability-r1\\baseline\\backend-red.xml"
+      ],
+      "exit_code": 1,
+      "expected_exit_code": 1,
+      "seconds": 25.192,
+      "ok": true,
+      "log": "backend-red.txt"
+    },
+    {
+      "name": "frontend-tests",
+      "command": [
+        "C:\\Program Files\\nodejs\\node.EXE",
+        "--test",
+        "--test-reporter=tap"
+      ],
+      "exit_code": 0,
+      "expected_exit_code": 0,
+      "seconds": 0.655,
+      "ok": true,
+      "log": "frontend-tests.txt"
+    },
+    {
+      "name": "frontend-red",
+      "command": [
+        "C:\\Program Files\\nodejs\\node.EXE",
+        "--test",
+        "--test-reporter=tap",
+        "tests/reliabilityR0.test.cjs"
+      ],
+      "exit_code": 1,
+      "expected_exit_code": 1,
+      "seconds": 0.618,
+      "ok": true,
+      "log": "frontend-red.txt"
+    },
+    {
+      "name": "frontend-lint",
+      "command": [
+        "C:\\Program Files\\nodejs\\npm.cmd",
+        "run",
+        "lint"
+      ],
+      "exit_code": 0,
+      "expected_exit_code": 0,
+      "seconds": 0.865,
+      "ok": true,
+      "log": "frontend-lint.txt"
+    },
+    {
+      "name": "frontend-build",
+      "command": [
+        "C:\\Program Files\\nodejs\\node.EXE",
+        "node_modules/vite/bin/vite.js",
+        "build",
+        "--outDir",
+        "C:\\Users\\PC\\AppData\\Local\\Temp\\clipforge-r0-build-q97nbcmf\\dist",
+        "--emptyOutDir"
+      ],
+      "exit_code": 0,
+      "expected_exit_code": 0,
+      "seconds": 3.247,
+      "ok": true,
+      "log": "frontend-build.txt"
+    }
+  ],
+  "started_at": "2026-10-03T09:32:01.381672+00:00",
+  "finished_at": "2026-10-03T09:36:24.489933+00:00",
+  "artifacts": "review/reliability-r1/baseline",
+  "preservation_check": "review/reliability-r1/preservation-check.json",
+  "limits": [
+    "Faults injected at I/O boundaries; no physical full disk or power-loss test.",
+    "Native Windows junctions and real worker races tested on development Windows, not a clean Windows VM.",
+    "No paid provider or browser E2E calls; F3-F9 remain open."
+  ]
+}

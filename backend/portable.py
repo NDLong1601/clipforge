@@ -701,54 +701,57 @@ def cleanup_preview() -> dict:
 
 
 def cleanup_cache() -> dict:
-    with jobs.LOCK:
-        if any(
-            job.status in {"queued", "running", "cancelling"}
-            for job in jobs.JOBS.values()
-        ):
-            raise ValueError("Đang có tác vụ chạy. Hãy đợi xong trước khi dọn cache.")
+    from . import recovery_paths
+
+    with jobs.cache_maintenance():
         root = store.ROOT / "cache"
+        recovery_paths.checked_path(store.ROOT, root)
         preview = cleanup_preview()
         if root.is_dir() and not root.is_symlink():
             for child in root.iterdir():
                 if child.is_symlink() or child.is_file():
                     child.unlink(missing_ok=True)
                 elif child.is_dir():
-                    shutil.rmtree(child)
+                    recovery_paths.remove_tree(store.ROOT, child)
         return {**preview, "deleted_bytes": preview["bytes_to_free"]}
 
 
 def trash_project(pid: str) -> dict:
-    if jobs.busy(pid):
+    if jobs.busy(pid) or jobs.has_active_jobs(pid):
         raise ValueError(
-            "Dự án đang chạy tác vụ. Hãy đợi trước khi chuyển vào thùng rác."
+            "Dự án đang được sao lưu hoặc chạy tác vụ. Hãy đợi trước khi chuyển vào thùng rác."
         )
-    with jobs.LOCK, store.LOCK, jobs.project_lock(pid):
-        if jobs.busy(pid):
+    if jobs.has_pinned_artifacts(pid):
+        raise ValueError(
+            "Dự án có tác vụ giữ checkpoint hoặc chờ xác nhận provider. Tiếp tục hoặc hủy tác vụ trước khi chuyển vào thùng rác."
+        )
+    with jobs.maintenance(pid), jobs.project_lock(pid):
+        if jobs.has_pinned_artifacts(pid):
             raise ValueError(
-                "Dự án đang chạy tác vụ. Hãy đợi trước khi chuyển vào thùng rác."
+                "Dự án có tác vụ giữ checkpoint hoặc chờ xác nhận provider. Tiếp tục hoặc hủy tác vụ trước khi chuyển vào thùng rác."
             )
-        source = store.project_dir(pid)
-        project = store.read(pid)
-        trash_root = store.ROOT / "trash"
-        trash_root.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-        trash_id = f"{pid}-{stamp}"
-        target = trash_root / trash_id
-        os.replace(source, target)
-        try:
-            store.atomic(
-                target / ".clipforge-trash.json",
-                {
-                    "id": trash_id,
-                    "project_id": pid,
-                    "name": project.name,
-                    "trashed_at": datetime.now(timezone.utc).isoformat(),
-                },
-            )
-        except BaseException:
-            os.replace(target, source)
-            raise
+        with store.LOCK:
+            source = store.project_dir(pid)
+            project = store.read(pid)
+            trash_root = store.ROOT / "trash"
+            trash_root.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+            trash_id = f"{pid}-{stamp}"
+            target = trash_root / trash_id
+            os.replace(source, target)
+            try:
+                store.atomic(
+                    target / ".clipforge-trash.json",
+                    {
+                        "id": trash_id,
+                        "project_id": pid,
+                        "name": project.name,
+                        "trashed_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                )
+            except BaseException:
+                os.replace(target, source)
+                raise
         return {
             "id": trash_id,
             "project_id": pid,
@@ -780,10 +783,12 @@ def list_trash() -> list[dict]:
 
 
 def _trash_path(trash_id: str) -> Path:
+    from .recovery_paths import checked_path
+
     if not re.fullmatch(r"[a-f0-9]{16}-\d{8}T\d{12}Z", trash_id):
         raise ValueError("ID trong thùng rác không hợp lệ.")
-    root = (store.ROOT / "trash").resolve()
-    path = (root / trash_id).resolve()
+    root = (store.ROOT / "trash").absolute()
+    path = checked_path(store.ROOT, root / trash_id)
     if path.parent != root or not path.is_dir() or path.is_symlink():
         raise FileNotFoundError("Không tìm thấy dự án trong thùng rác.")
     try:
@@ -796,7 +801,7 @@ def _trash_path(trash_id: str) -> Path:
 
 
 def restore_project(trash_id: str) -> dict:
-    with jobs.LOCK, store.LOCK:
+    with jobs.maintenance(trash_id[:16]), jobs.project_lock(trash_id[:16]), store.LOCK:
         path = _trash_path(trash_id)
         item = json.loads((path / ".clipforge-trash.json").read_text(encoding="utf-8"))
         destination = store.project_dir(item["project_id"])
@@ -815,11 +820,17 @@ def restore_project(trash_id: str) -> dict:
 
 
 def permanently_delete_trash(trash_id: str) -> dict:
-    with jobs.LOCK, store.LOCK:
-        path = _trash_path(trash_id)
-        item = json.loads((path / ".clipforge-trash.json").read_text(encoding="utf-8"))
+    from .recovery_paths import remove_tree
+
+    pid = trash_id[:16]
+    with jobs.maintenance(pid), jobs.project_lock(pid):
+        if jobs.has_pinned_artifacts(pid):
+            raise ValueError("Dự án có tác vụ giữ checkpoint hoặc chờ hoàn tất commit.")
+        with store.LOCK:
+            path = _trash_path(trash_id)
+            item = json.loads((path / ".clipforge-trash.json").read_text(encoding="utf-8"))
         size = _bytes(path)
-        shutil.rmtree(path)
+        remove_tree(store.ROOT, path)
         return {
             "id": trash_id,
             "name": item.get("name", "Dự án"),

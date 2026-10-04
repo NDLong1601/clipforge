@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "id": "render-job-0004",
+  "pid": "project-0000000004",
+  "kind": "render",
+  "operation_version": 1,
+  "payload": {"preview": false},
+  "input_revision": 20,
+  "input_fingerprint": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+  "snapshot_ref": "job_runs/render-job-0004/snapshot.json",
+  "attempt": 1,
+  "state_version": 7,
+  "status": "interrupted",
+  "steps": [{"id": "validate", "status": "done"}],
+  "commit_intent": {
+    "commit_token": "commit-render-job-0004",
+    "project_id": "project-0000000004",
+    "expected_source_revision": 20,
+    "export_id": "export-0004"
+  },
+  "project_after_crash": {
+    "revision": 21,
+    "export_ids": ["export-0004"],
+    "applied_commit_token": "commit-render-job-0004"
+  },
+  "expected_behavior": "Recovery writes the missing receipt and marks the job done without saving project again, incrementing revision, or adding another export."
+}

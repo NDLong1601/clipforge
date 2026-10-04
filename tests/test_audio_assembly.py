@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from backend import audio_assembly, jobs, media, planner, providers, render, store
 from backend.main import app
+from tests.fixtures.job_helpers import wait_for_job
 from backend.models import Asset, Clip, Cue, Project, Scene, Settings, TextRegion
 from backend.preflight import preflight
 from backend.timeline_math import clip_starts, timeline_duration
@@ -36,6 +37,7 @@ def mock_gemini(monkeypatch, segments):
     settings=Settings(ai_profiles=[{'id':'gemini','name':'Gemini','provider':'gemini',
         'model':'configured-model','api_key':'fixture-secret'}],active_ai_profile_id='gemini')
     monkeypatch.setattr(providers,'settings',lambda:settings)
+    monkeypatch.setattr(store,'settings',lambda:settings)
     requests=[]
     def respond(request):
         requests.append(request)
@@ -100,7 +102,7 @@ def test_assembly_without_sources_keeps_transcript_and_waits(isolated,monkeypatc
     with TestClient(app) as client:
         response=client.post(f'/api/projects/{p.id}/assemble-audio')
         assert response.status_code==200
-        job=jobs.JOBS[response.json()['id']];job._future.result(timeout=15)
+        job=jobs.JOBS[response.json()['id']];wait_for_job(job)
         assert job.status=='done',job.message
         saved=store.read(p.id)
         assert saved.voice_id==voice.id and saved.script=='Nội dung audio.'
@@ -115,7 +117,7 @@ def test_upload_requests_automatic_assembly_but_music_does_not(isolated):
             response=client.post(f'/api/projects/{p.id}/assets',
                 files={'files':('narration.wav',wav_bytes(),'audio/wav')},
                 data={'role':role,'auto_assemble':'true'})
-            job=jobs.JOBS[response.json()['job']['id']];job._future.result(timeout=15)
+            job=jobs.JOBS[response.json()['job']['id']];wait_for_job(job)
             assert job.status=='done'
             assert job.result['auto_assemble'] is automatic
             assert len(store.read(p.id).assets)==1
@@ -127,7 +129,7 @@ def test_audio_dropped_in_source_library_is_routed_to_voice(isolated):
         response=client.post(f'/api/projects/{p.id}/assets',
             files={'files':('narration.wav',wav_bytes(),'audio/wav')},
             data={'role':'source','auto_assemble':'true'})
-        job=jobs.JOBS[response.json()['job']['id']];job._future.result(timeout=15)
+        job=jobs.JOBS[response.json()['job']['id']];wait_for_job(job)
         assert job.status=='done' and job.result['auto_assemble']
         saved=store.read(p.id)
         assert saved.assets[0].role=='voice' and saved.voice_id==saved.assets[0].id

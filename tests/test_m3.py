@@ -32,7 +32,7 @@ def test_interrupted_jobs_are_persisted_and_not_restarted(isolated):
 
     saved = jobs.JOBS[job.id].dump()
     assert saved['status'] == 'interrupted'
-    assert 'chủ động chạy lại' in saved['message']
+    assert 'cần xác nhận' in saved['message']
     assert not jobs.busy(project.id)
 
 

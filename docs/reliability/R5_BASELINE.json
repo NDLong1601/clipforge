@@ -1,0 +1,153 @@
+{
+  "milestone": "R5",
+  "status": "complete",
+  "date": "2026-10-04",
+  "closed_findings": [
+    "F8"
+  ],
+  "cumulative_closed_findings": [
+    "F1",
+    "F2",
+    "F3",
+    "F4",
+    "F5",
+    "F6",
+    "F7",
+    "F8",
+    "F9"
+  ],
+  "scope": "regressions; full acceptance follows in R6",
+  "backend": {
+    "counts": {
+      "passed": 204
+    },
+    "red_findings": {},
+    "unexpected_failures": []
+  },
+  "frontend": {
+    "passed": 39,
+    "failed": 0,
+    "todo": 0
+  },
+  "raw_backend": {
+    "counts": {
+      "passed": 17
+    },
+    "red_findings": {},
+    "unexpected_failures": []
+  },
+  "raw_frontend": {
+    "passed": 10,
+    "red_findings": {}
+  },
+  "r5_cases": 12,
+  "baseline_valid": true,
+  "release_ready": false,
+  "environment": {
+    "os": "Windows-11-10.0.26200-SP0",
+    "python": "3.13.7 (tags/v3.13.7:bcee1c3, Aug 14 2025, 14:15:11) [MSC v.1944 64 bit (AMD64)]",
+    "interpreter": "C:\\Users\\PC\\Documents\\clipforge\\.venv\\Scripts\\python.exe",
+    "node": "v24.14.0",
+    "psutil_installed": true,
+    "packages": {
+      "pytest": "9.1.1",
+      "fastapi": "0.141.1",
+      "av": "18.1.0",
+      "imageio-ffmpeg": "0.6.0",
+      "psutil": "7.2.2"
+    },
+    "ffmpeg": "ffmpeg version N-125875-g5d4d3bdc61-20260731 Copyright (c) 2000-2026 the FFmpeg developers"
+  },
+  "started_at": "2026-10-03T17:28:53.914258+00:00",
+  "finished_at": "2026-10-03T17:33:50.216951+00:00",
+  "steps": [
+    {
+      "name": "backend-tests",
+      "command": [
+        "C:\\Users\\PC\\Documents\\clipforge\\.venv\\Scripts\\python.exe",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/test_job_runtime_fixture.py",
+        "tests/test_reliability_r0.py",
+        "tests/test_reliability_r0_process.py",
+        "tests/test_reliability_r1.py",
+        "tests/test_reliability_r2.py",
+        "tests/test_reliability_r3.py",
+        "tests/test_reliability_r4.py",
+        "tests/test_reliability_r5.py",
+        "--junitxml=C:\\Users\\PC\\Documents\\clipforge\\review\\reliability-r5\\baseline\\backend-tests.xml"
+      ],
+      "exit_code": 0,
+      "expected_exit_code": 0,
+      "seconds": 180.823,
+      "ok": true,
+      "log": "backend-tests.txt"
+    },
+    {
+      "name": "backend-red",
+      "command": [
+        "C:\\Users\\PC\\Documents\\clipforge\\.venv\\Scripts\\python.exe",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/test_reliability_r0.py",
+        "tests/test_reliability_r0_process.py",
+        "--runxfail",
+        "--junitxml=C:\\Users\\PC\\Documents\\clipforge\\review\\reliability-r5\\baseline\\backend-red.xml"
+      ],
+      "exit_code": 0,
+      "expected_exit_code": 0,
+      "seconds": 47.739,
+      "ok": true,
+      "log": "backend-red.txt"
+    },
+    {
+      "name": "frontend-tests",
+      "command": [
+        "C:\\Program Files\\nodejs\\node.EXE",
+        "--test",
+        "--test-reporter=tap",
+        "tests/reliabilityR0.test.cjs",
+        "tests/reliabilityR2.test.cjs",
+        "tests/reliabilityR3.test.cjs",
+        "tests/reliabilityR4.test.cjs",
+        "tests/reliabilityR5.test.cjs"
+      ],
+      "exit_code": 0,
+      "expected_exit_code": 0,
+      "seconds": 0.628,
+      "ok": true,
+      "log": "frontend-tests.txt"
+    },
+    {
+      "name": "frontend-red",
+      "command": [
+        "C:\\Program Files\\nodejs\\node.EXE",
+        "--test",
+        "--test-reporter=tap",
+        "tests/reliabilityR0.test.cjs"
+      ],
+      "exit_code": 0,
+      "expected_exit_code": 0,
+      "seconds": 0.652,
+      "ok": true,
+      "log": "frontend-red.txt"
+    }
+  ],
+  "source_snapshot": {
+    "sha256": "3809848fbe047d5b6c04d50a52fa44bf5402270bac1289f3f6610f41ef7b28fd",
+    "files": 187,
+    "predeleted_paths": 7
+  },
+  "source_audit": {
+    "matched_operational_files": 134,
+    "artifacts": "review/reliability-r5/baseline",
+    "frontend_snapshot": "frontend-run-source.json",
+    "backend_snapshot": "run-source.json"
+  },
+  "intentional_deferrals": [
+    "Whole-job leases remain; step-based transitions and per-job running pause deferred.",
+    "VM, real constrained volume and paid providers not executed."
+  ]
+}

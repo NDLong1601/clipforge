@@ -194,9 +194,12 @@ class ProductInfo(Model):
 
 
 class Project(Model):
-    schema_version: int = 5
+    schema_version: int = 7
     id: str = Field(default_factory=uid)
     revision: int = 0
+    content_revision: int = 0
+    # Kept outside undo/redo semantics so interrupted job commits are never replayed.
+    job_commit_tokens: list[str] = Field(default_factory=list)
     name: str = Field(default="Video mới", min_length=1, max_length=150)
     mode: Literal["remix", "template"] = "remix"
     script: str = Field(default="", max_length=12000)

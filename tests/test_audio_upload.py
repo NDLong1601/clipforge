@@ -8,6 +8,7 @@ from PIL import Image
 from backend import jobs, store
 from backend.main import app
 from backend.models import Project
+from tests.fixtures.job_helpers import wait_for_job
 
 
 @pytest.fixture
@@ -21,7 +22,7 @@ def finish_upload(client, pid, files, role):
     response = client.post(f'/api/projects/{pid}/assets', files=files, data={'role': role})
     assert response.status_code == 200, response.text
     job = jobs.JOBS[response.json()['job']['id']]
-    job._future.result(timeout=15)
+    wait_for_job(job)
     assert job.status == 'done', job.dump()
     assert not (store.ROOT / 'staging' / pid / job.id).exists()
     return client.get(f'/api/projects/{pid}').json()

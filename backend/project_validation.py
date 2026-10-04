@@ -9,7 +9,7 @@ from .models import Project
 
 def validate_project(project: Project) -> Project:
     """Validate references and structural invariants without touching the filesystem."""
-    if project.schema_version != 5:
+    if project.schema_version != 7:
         raise ValueError(
             f"schema_version: phiên bản {project.schema_version} chưa được hỗ trợ"
         )
