@@ -11,3 +11,5 @@ Tư liệu trong dự án demo được tạo bằng Pillow/FFmpeg và bộ tổ
 Bộ lọc khuôn mặt dùng mô hình YuNet của OpenCV Zoo (MIT), chạy trên máy, không gửi video lên dịch vụ ngoài.
 Mô hình, giấy phép và commit/SHA-256 nguồn được lưu trong `backend/assets/`.
 Nguồn: https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet.
+
+Bản dọc vẽ tay (`backend/portrait.py`) chuyển từ bước presentation của bộ srt-whiteboard-animation-custom của người dùng. Nền lưới, nhạc Relaxed và hai sprite người kể trong `backend/assets/portrait/` lấy từ bộ đó; prompt tạo sprite lưu cùng tệp provenance. Cần xác nhận quyền sử dụng nhạc Relaxed trước khi phân phối công khai.

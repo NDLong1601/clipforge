@@ -17,6 +17,7 @@ from . import (
     providers,
     planner,
     render,
+    portrait,
     audio_assembly,
     face_filter,
 )
@@ -26,7 +27,7 @@ from . import portable
 from . import diagnostics
 from .errors import safe_message
 from .template_packages import MissingTemplateAssets
-from .models import Project, Asset, Action, Template, Clip, uid, AIApplyRequest, AIApplyCommit
+from .models import Project, Asset, Action, Template, Clip, uid, AIApplyRequest, AIApplyCommit, PortraitRequest
 from .project_validation import validate_project
 from .font_manager import available as available_fonts
 from . import sound_effects
@@ -150,7 +151,7 @@ def _run_project_job(job):
     })
     cached_value = (
         job.load_checkpoint("project-result", result_fingerprint)
-        if job.kind != "render"
+        if job.kind not in jobs.EXPORT_KINDS
         else None
     )
     cached_project = job_inputs.cached_project(cached_value, p)
@@ -217,6 +218,8 @@ def _run_project_job(job):
         p.mode = "template"
     elif job.kind == "render":
         render_info = render.render(p, job, bool(payload.get("preview")))
+    elif job.kind == "portrait":
+        render_info = portrait.render(p, job, payload)
     elif job.kind == "demo":
         from .demo import build_demo
 
@@ -376,7 +379,7 @@ def _run_upload_job(job):
     return {"project_id": saved.id, "revision": saved.revision, "auto_assemble": auto_assemble}
 
 
-for _kind in ("analyze", "plan", "voice", "assemble-audio", "filter-faces", "transcribe", "template", "render", "demo"):
+for _kind in ("analyze", "plan", "voice", "assemble-audio", "filter-faces", "transcribe", "template", "render", "portrait", "demo"):
     jobs.register_handler(_kind, _run_project_job)
 jobs.register_handler("assistant", _run_assistant_job)
 jobs.register_handler("upload", _run_upload_job)
@@ -1112,6 +1115,32 @@ def export(pid: str, action: Action):
         )
 
 
+@app.post("/api/projects/{pid}/portrait")
+def export_portrait(pid: str, data: PortraitRequest):
+    """Frame a finished export into the whiteboard portrait layout as a new export."""
+    with jobs.LOCK, store.LOCK:
+        unlocked(pid)
+        current = store.read(pid)
+        if data.revision is not None and data.revision != current.revision:
+            raise HTTPException(409, "Dự án đã đổi. Tải lại dự án trước khi xuất.")
+        source = next((item for item in current.exports if item.get("id") == data.export_id), None)
+        payload = data.model_dump(exclude={"revision"})
+        try:
+            portrait.options(payload, source)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+        source_dir = store.project_dir(pid) / "exports" / data.export_id
+        if not (source_dir / str(source.get("filename", ""))).is_file():
+            raise HTTPException(409, "File bản xuất nguồn đã bị xóa. Dựng lại video rồi thử lại.")
+        return jobs.submit(
+            pid,
+            "portrait",
+            payload,
+            current.model_dump(),
+            config_fingerprint=_job_config_fingerprint("portrait"),
+        )
+
+
 @app.post("/api/jobs/render-batch")
 def batch_render(data: dict):
     entries = data.get("projects") if isinstance(data, dict) else None
@@ -1178,6 +1207,8 @@ def export_file(pid: str, eid: str, name: str):
         "captions.srt",
         "captions.ass",
         "project.json",
+        portrait.OUTPUT,
+        portrait.COVER,
     ]:
         raise HTTPException(404)
     path = store.project_dir(pid) / "exports" / eid / name

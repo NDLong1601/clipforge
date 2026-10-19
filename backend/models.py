@@ -284,6 +284,15 @@ class Action(Model):
     revision: int | None = Field(default=None, ge=0)
 
 
+class PortraitRequest(Model):
+    export_id: str = Field(pattern=r"^[a-f0-9]{8,64}$")
+    case: Literal["nam", "nu"] = "nam"
+    hook_lines: list[str] = Field(default_factory=list, max_length=3)
+    music: bool = True
+    playback_rate: Literal[1.0, 1.1, 1.2] = 1.1
+    revision: int | None = Field(default=None, ge=0)
+
+
 class AIClipChange(Model):
     id: str = Field(min_length=1, max_length=64)
     title: str | None = Field(default=None, max_length=500)

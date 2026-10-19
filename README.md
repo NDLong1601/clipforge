@@ -95,6 +95,12 @@ Template JSON có `viewport`, `layers`, `slot_durations`, `slot_layers`, `captio
 - Nhạc tự lặp đủ thời lượng, fade out ở cuối, có điều chỉnh mức âm và ducking theo voice. **Âm thanh từ video nguồn** có slider riêng và mặc định tắt.
 - Trong **Mẫu dựng**, chọn font đã cài trên máy và vùng an toàn phụ đề tiêu chuẩn, Reels/Shorts hoặc điện ảnh. Nếu dự án mở trên máy thiếu font đã lưu, preflight nêu font được ánh xạ sang fallback hiện có.
 
+## Bản dọc vẽ tay
+
+Trong **Bản xuất gần đây**, bấm biểu tượng điện thoại cạnh một bản xuất để tạo **bản dọc vẽ tay** 1080 × 1920, 30 fps. Video đã dựng được giữ nguyên và đặt giữa khung; nền lưới tím chuyển động, người kể chuyện chibi (nam hoặc nữ) ở góc dưới trái đổi tư thế theo năng lượng giọng, hook vàng 1–3 dòng ở phía trên. Có thể thêm nhạc Relaxed tự giảm khi có lời và chọn tốc độ x1.0, x1.1 (mặc định) hoặc x1.2; tốc độ giữ cao độ giọng.
+
+Bản xuất 16:9 cho bố cục giống các video vẽ tay đã duyệt; bản 9:16 và 1:1 được thu vào khung hẹp hơn để không bị cắt. Hook được gợi ý từ câu đầu kịch bản và cần được soát lại. Bước này không gọi AI và không dựng lại cảnh. Bản dọc là một bản xuất mới, có ảnh bìa `portrait-cover.jpg`; nếu dự án đã có nhạc nền, ô thêm nhạc mặc định tắt để tránh chồng hai lớp nhạc. Case đối thoại hai người kể chưa có trong bước này.
+
 ## Trợ lý AI
 
 Nhập yêu cầu trong tab **Trợ lý AI**. Model trả đề xuất đổi kịch bản, chữ/cảnh, thời lượng hoặc âm lượng. Bỏ chọn mục không muốn áp dụng; cảnh được so sánh bằng tên và thumbnail trước/sau. Bấm **Xem trước & preflight** trước khi commit. Áp dụng yêu cầu đúng revision và token preview còn hạn; sau đó có thể **Hoàn tác**. Response được xác thực bằng schema, ID lạ hoặc cảnh đã khóa bị từ chối.
@@ -146,6 +152,7 @@ backend/
   planner.py    Phân bổ lời đọc và chọn cảnh
   providers.py  AI, TTS, ASR
   render.py     FFmpeg, lớp đồ họa, phụ đề, trộn âm
+  portrait.py   Bản dọc vẽ tay: nền lưới, người kể, hook, nhạc
   demo.py       Tạo dự án mẫu trên máy
 frontend/src/   Giao diện React
 frontend/dist/  Giao diện đã build để chạy ngay
