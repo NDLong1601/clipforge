@@ -1,6 +1,7 @@
 import { createRoot } from 'react-dom/client';
 import './style.css';
 import './m6.css';
+import './whiteboard.css';
 import '@fontsource/be-vietnam-pro/vietnamese-400.css';
 import '@fontsource/be-vietnam-pro/vietnamese-500.css';
 import '@fontsource/be-vietnam-pro/vietnamese-600.css';

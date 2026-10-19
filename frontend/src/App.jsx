@@ -16,6 +16,7 @@ import {
   Loader2,
   Mic2,
   PanelLeftClose,
+  PenTool,
   Play,
   Plus,
   Redo2,
@@ -46,7 +47,12 @@ import { Preview } from './components/Preview.jsx';
 import { SettingsModal } from './components/SettingsModal.jsx';
 import { TaskCenter } from './components/TaskCenter.jsx';
 import { Timeline } from './components/Timeline.jsx';
-import { useJobEvents } from './hooks/useJobEvents.js';
+import {
+  WhiteboardInspector,
+  WhiteboardPanel,
+  WhiteboardPreview,
+} from './components/WhiteboardPanel.jsx';
+import { EXPORT_KINDS, useJobEvents } from './hooks/useJobEvents.js';
 import { useJobs } from './hooks/useJobs.js';
 import { usePreviewState } from './hooks/usePreviewState.js';
 import { useProjectSession } from './hooks/useProjectSession.js';
@@ -79,6 +85,7 @@ export default function App() {
   const [projects, setProjects] = useState([]),
     [tab, setTab] = useState('media'),
     [selected, setSelected] = useState(0),
+    [wbSelected, setWbSelected] = useState(0),
     [busy, setBusy] = useState(false),
     [toast, setToast] = useState(''),
     [error, setError] = useState(''),
@@ -339,6 +346,9 @@ export default function App() {
             template: 'phân tích mẫu',
             render: 'xuất video',
             portrait: 'xuất bản dọc vẽ tay',
+            'whiteboard-render': 'xuất video vẽ tay',
+            'whiteboard-plan': 'lập storyboard vẽ tay',
+            'whiteboard-images': 'vẽ tranh AI',
             transcribe: 'căn phụ đề',
             demo: 'dự án mẫu',
             upload: 'nhập tư liệu',
@@ -362,7 +372,9 @@ export default function App() {
         }
       }
       const requestBody =
-        name === 'assistant' ? { ...body, revision: pRef.current.revision } : body;
+        name === 'assistant' || name.startsWith('whiteboard/')
+          ? { ...body, revision: pRef.current.revision }
+          : body;
       const job = await api(`/projects/${pRef.current.id}/${name}`, requestBody);
       setJobs((old) => [...old, job]);
       return job;
@@ -472,9 +484,35 @@ export default function App() {
     }
   }, [p?.clips.length, duration]);
   const projectMutationJob = jobs.find(
-    (job) => job.kind !== 'render' && ['queued', 'running', 'cancelling'].includes(job.status),
+    (job) =>
+      !EXPORT_KINDS.includes(job.kind) && ['queued', 'running', 'cancelling'].includes(job.status),
   );
   const locked = busy || !!projectMutationJob || !!conflict;
+  const whiteboard = p?.mode === 'whiteboard';
+  useEffect(() => {
+    const count = p?.whiteboard?.scenes.length || 0;
+    if (wbSelected >= count) setWbSelected(Math.max(0, count - 1));
+  }, [p?.whiteboard?.scenes.length]);
+  useEffect(() => {
+    if (whiteboard && tab === 'template') setTab('whiteboard');
+    if (!whiteboard && tab === 'whiteboard') setTab('media');
+  }, [whiteboard]);
+  const importWhiteboard = (file) =>
+    safe(async () => {
+      if (dirtyRef.current && !(await save())) return;
+      const form = new FormData();
+      form.append('file', file);
+      form.append('revision', String(pRef.current.revision));
+      const next = await api(`/projects/${pRef.current.id}/whiteboard/import`, form, 'POST', {
+        timeoutMs: 600000,
+      });
+      setP(next);
+      setDirty(false);
+      setWbSelected(0);
+      setPreview(null);
+      setTab('whiteboard');
+      setToast(`Đã nhập ${next.whiteboard.scenes.length} cảnh từ bộ vẽ tay`);
+    });
   const selectClip = (i, preserveCursor = false) => {
     setSelected(i);
     if (!preserveCursor) setCursor(clipStarts(p.clips)[i] || 0);
@@ -788,7 +826,12 @@ export default function App() {
                   <span>
                     <strong>{item.name}</strong>
                     <small>
-                      {item.mode === 'template' ? 'Theo mẫu' : 'Tái biên tập'} · {item.clips} cảnh
+                      {item.mode === 'whiteboard'
+                        ? 'Vẽ tay'
+                        : item.mode === 'template'
+                          ? 'Theo mẫu'
+                          : 'Tái biên tập'}{' '}
+                      · {item.clips} cảnh
                     </small>
                   </span>
                 </button>
@@ -1007,8 +1050,10 @@ export default function App() {
                     small
                     primary
                     icon={Download}
-                    disabled={locked || !p.clips.length}
-                    onClick={() => run('render', { preview: false })}
+                    disabled={locked || !(whiteboard ? p.whiteboard.scenes.length : p.clips.length)}
+                    onClick={() =>
+                      whiteboard ? run('whiteboard/render') : run('render', { preview: false })
+                    }
                   >
                     Xuất video
                   </Button>
@@ -1017,7 +1062,13 @@ export default function App() {
               <div className="editor-grid">
                 <section className="control-pane">
                   <nav className="tabs">
-                    {tabs.map(([key, label, Icon]) => (
+                    {(whiteboard
+                      ? [
+                          ['whiteboard', 'Vẽ tay', PenTool],
+                          ...tabs.filter(([key]) => key !== 'template'),
+                        ]
+                      : tabs
+                    ).map(([key, label, Icon]) => (
                       <button
                         key={key}
                         className={tab === key ? 'active' : ''}
@@ -1046,7 +1097,26 @@ export default function App() {
                         <LayoutTemplate size={15} />
                         Theo mẫu
                       </button>
+                      <button
+                        disabled={locked}
+                        className={whiteboard ? 'active' : ''}
+                        onClick={() => {
+                          edit((n) => (n.mode = 'whiteboard'));
+                          setTab('whiteboard');
+                        }}
+                      >
+                        <PenTool size={15} />
+                        Vẽ tay
+                      </button>
                     </div>
+                    {whiteboard && tab === 'whiteboard' && (
+                      <WhiteboardPanel
+                        {...{ p, edit, locked, run, upload, useAI, setUseAI }}
+                        selected={wbSelected}
+                        setSelected={setWbSelected}
+                        onImport={importWhiteboard}
+                      />
+                    )}
                     {tab === 'media' && (
                       <MediaPanel
                         {...{ p, upload, locked, run, useAI, setUseAI, edit, addScene }}
@@ -1072,7 +1142,7 @@ export default function App() {
                         onConfirmCues={confirmCues}
                       />
                     )}
-                    {tab === 'template' && (
+                    {tab === 'template' && !whiteboard && (
                       <TemplatePanel
                         {...{
                           p,
@@ -1132,7 +1202,10 @@ export default function App() {
                     <span>
                       <i className="dot" /> XEM TRƯỚC
                     </span>
-                    <div className="select-inline">
+                    <div
+                      className="select-inline"
+                      style={whiteboard ? { display: 'none' } : undefined}
+                    >
                       <select
                         aria-label="Tỷ lệ khung"
                         disabled={locked}
@@ -1154,22 +1227,29 @@ export default function App() {
                       </select>
                     </div>
                   </div>
-                  <Preview
-                    {...{ p, selected, preview, play, setPlay, cursor, setCursor, duration }}
-                    onSelect={setSelected}
-                    previewIsStale={
-                      !!preview &&
-                      (dirty ||
-                        (preview.source_revision != null
-                          ? preview.source_revision !== p.content_revision
-                          : preview.project_revision !== p.revision))
-                    }
-                    onReturnLive={() => {
-                      setPreview(null);
-                      setPlay(false);
-                    }}
-                  />
-                  <div className="preview-controls">
+                  {whiteboard && !preview ? (
+                    <WhiteboardPreview p={p} selected={wbSelected} dirty={dirty} />
+                  ) : (
+                    <Preview
+                      {...{ p, selected, preview, play, setPlay, cursor, setCursor, duration }}
+                      onSelect={setSelected}
+                      previewIsStale={
+                        !!preview &&
+                        (dirty ||
+                          (preview.source_revision != null
+                            ? preview.source_revision !== p.content_revision
+                            : preview.project_revision !== p.revision))
+                      }
+                      onReturnLive={() => {
+                        setPreview(null);
+                        setPlay(false);
+                      }}
+                    />
+                  )}
+                  <div
+                    className="preview-controls"
+                    style={whiteboard ? { display: 'none' } : undefined}
+                  >
                     <Button
                       small
                       icon={Play}
@@ -1194,7 +1274,7 @@ export default function App() {
                       Dựng xem thử
                     </Button>
                   </div>
-                  {!preview && (
+                  {!preview && !whiteboard && (
                     <input
                       aria-label="Vị trí phát"
                       className="scrubber"
@@ -1215,7 +1295,9 @@ export default function App() {
                   <small className="preview-note">
                     {preview
                       ? 'Bản MP4 đã dựng · ' + preview.width + ' × ' + preview.height
-                      : 'Xem nhanh bố cục. Dựng xem thử để kiểm tra chính xác hiệu ứng và âm thanh.'}
+                      : whiteboard
+                        ? 'Hình hoàn chỉnh của cảnh; ô xanh đánh số là thứ tự bàn tay vẽ.'
+                        : 'Xem nhanh bố cục. Dựng xem thử để kiểm tra chính xác hiệu ứng và âm thanh.'}
                   </small>
                 </section>
                 <aside className="inspector">
@@ -1224,10 +1306,24 @@ export default function App() {
                       <SlidersHorizontal size={15} /> CHỈNH CẢNH
                     </span>
                     <span className="count-pill">
-                      {p.clips.length ? String(selected + 1).padStart(2, '0') : '—'}
+                      {whiteboard
+                        ? p.whiteboard.scenes.length
+                          ? String(wbSelected + 1).padStart(2, '0')
+                          : '—'
+                        : p.clips.length
+                          ? String(selected + 1).padStart(2, '0')
+                          : '—'}
                     </span>
                   </div>
-                  <ClipInspector {...{ p, selected, edit, locked }} />
+                  {whiteboard ? (
+                    <WhiteboardInspector
+                      {...{ p, edit, locked, run, upload }}
+                      selected={wbSelected}
+                      setSelected={setWbSelected}
+                    />
+                  ) : (
+                    <ClipInspector {...{ p, selected, edit, locked }} />
+                  )}
                   <div className="export-history">
                     <h4>Bản xuất gần đây</h4>
                     {p.exports.length === 0 ? (
@@ -1248,9 +1344,11 @@ export default function App() {
                                 <Play size={14} />
                                 {e.kind === 'portrait'
                                   ? 'Bản dọc vẽ tay'
-                                  : e.preview
-                                    ? 'Xem thử'
-                                    : 'Video'}{' '}
+                                  : e.kind === 'whiteboard'
+                                    ? 'Video vẽ tay'
+                                    : e.preview
+                                      ? 'Xem thử'
+                                      : 'Video'}{' '}
                                 · {e.duration}s
                               </button>
                               {e.encoder && (
@@ -1258,6 +1356,8 @@ export default function App() {
                                   {e.hardware_encoder ? 'GPU' : 'CPU'} · {e.encoder}
                                   {e.kind === 'portrait' ? (
                                     ` · ${e.case === 'nu' ? 'Nữ' : 'Nam'} · x${e.playback_rate}`
+                                  ) : e.kind === 'whiteboard' ? (
+                                    ` · ${e.scene_count} cảnh · ${e.aspect}`
                                   ) : (
                                     <>
                                       {' · cache '}
@@ -1271,7 +1371,7 @@ export default function App() {
                             </div>
                             <a
                               href={exportUrl(p, e)}
-                              download={`${p.name}${e.kind === 'portrait' ? '-ban-doc' : ''}.mp4`}
+                              download={`${p.name}${{ portrait: '-ban-doc', whiteboard: '-ve-tay' }[e.kind] || ''}.mp4`}
                               title="Tải MP4"
                             >
                               <Download size={15} />
@@ -1301,24 +1401,26 @@ export default function App() {
                   </div>
                 </aside>
               </div>
-              <Timeline
-                p={p}
-                selected={selected}
-                cursor={cursor}
-                setCursor={setCursor}
-                setPlay={setPlay}
-                onSelect={selectClip}
-                edit={edit}
-                locked={locked}
-                duration={duration}
-                onSplit={splitAtPlayhead}
-                onDuplicate={duplicateSelected}
-                onDelete={deleteSelected}
-                onToggleLock={toggleSelectedLock}
-                useAI={useAI}
-                setUseAI={setUseAI}
-                onPlan={() => run('plan', { use_ai: useAI })}
-              />
+              {!whiteboard && (
+                <Timeline
+                  p={p}
+                  selected={selected}
+                  cursor={cursor}
+                  setCursor={setCursor}
+                  setPlay={setPlay}
+                  onSelect={selectClip}
+                  edit={edit}
+                  locked={locked}
+                  duration={duration}
+                  onSplit={splitAtPlayhead}
+                  onDuplicate={duplicateSelected}
+                  onDelete={deleteSelected}
+                  onToggleLock={toggleSelectedLock}
+                  useAI={useAI}
+                  setUseAI={setUseAI}
+                  onPlan={() => run('plan', { use_ai: useAI })}
+                />
+              )}
               {p.warnings.length > 0 && (
                 <div className="warnings">
                   <AlertCircle size={14} />

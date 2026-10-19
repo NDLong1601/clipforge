@@ -101,6 +101,17 @@ Trong **Bản xuất gần đây**, bấm biểu tượng điện thoại cạnh
 
 Bản xuất 16:9 cho bố cục giống các video vẽ tay đã duyệt; bản 9:16 và 1:1 được thu vào khung hẹp hơn để không bị cắt. Hook được gợi ý từ câu đầu kịch bản và cần được soát lại. Bước này không gọi AI và không dựng lại cảnh. Bản dọc là một bản xuất mới, có ảnh bìa `portrait-cover.jpg`; nếu dự án đã có nhạc nền, ô thêm nhạc mặc định tắt để tránh chồng hai lớp nhạc. Case đối thoại hai người kể chưa có trong bước này.
 
+## Video vẽ tay
+
+Chọn chế độ **Vẽ tay** để dựng video whiteboard: bàn tay vẽ lần lượt từng vùng của tranh theo lời đọc, có từ khóa ngắn và ảnh sản phẩm thật. Cần giọng đọc trước (tạo giọng AI hoặc nhập file ở tab Âm thanh); cảnh nối liền nhau theo thời lượng giọng, tối thiểu 0,8 giây mỗi cảnh.
+
+1. **Lập storyboard từ lời thoại** chia cảnh theo phụ đề. Bật AI để AI chia theo ý, viết 1–2 từ khóa, mô tả tranh và thiết kế nhân vật; tắt AI thì ghép câu thành cảnh 2–6 giây.
+2. **Tạo nhân vật bằng AI** vẽ một ảnh nhân vật khóa. **Vẽ tranh AI cho cảnh còn thiếu** vẽ mọi cảnh chưa có tranh; cảnh có nhân vật được vẽ từ ảnh khóa (`/images/edits`) để giữ cùng gương mặt và nét vẽ. Có thể tải tranh của mình (vai trò *Tranh vẽ tay*) và chọn cho từng cảnh. Model, chất lượng và cấu hình API tạo ảnh nằm trong **Cài đặt API**; mỗi ảnh là một lần gọi có phí.
+3. **Nhập dự án từ bộ vẽ tay (ZIP)** đọc ZIP do bộ srt-whiteboard-animation-custom đóng gói: giữ voice, nhạc, ảnh sản phẩm, nhân vật khóa, tranh và vùng cắt, khung tranh, vùng vẽ với mốc vẽ, từ khóa và transcript. Chữ chạy dưới cùng, hiệu ứng xoay/nét phụ và vị trí ảnh sản phẩm của bộ đó chưa được nhập.
+4. **Xuất video** vẽ từng cảnh trong tiến trình riêng (hủy được), ghép chuyển cảnh, từ khóa, ảnh sản phẩm, rồi trộn voice/nhạc theo chuỗi âm thanh của bộ vẽ tay. Clip cảnh được cache theo nội dung nên xuất lại chỉ vẽ cảnh đã đổi. Kết quả là `video.mp4` 1920 × 1080 hoặc 1080 × 1920 kèm `captions.srt`; bấm biểu tượng điện thoại để ghép tiếp thành bản dọc có người kể.
+
+Vùng vẽ được tách tự động từ tranh (các cụm nét theo thứ tự đọc, tối đa 6 vùng); khung xem trước đánh số thứ tự bàn tay vẽ. Nền trắng của ảnh được hòa vào màu bảng #F6F1E3.
+
 ## Trợ lý AI
 
 Nhập yêu cầu trong tab **Trợ lý AI**. Model trả đề xuất đổi kịch bản, chữ/cảnh, thời lượng hoặc âm lượng. Bỏ chọn mục không muốn áp dụng; cảnh được so sánh bằng tên và thumbnail trước/sau. Bấm **Xem trước & preflight** trước khi commit. Áp dụng yêu cầu đúng revision và token preview còn hạn; sau đó có thể **Hoàn tác**. Response được xác thực bằng schema, ID lạ hoặc cảnh đã khóa bị từ chối.
@@ -153,6 +164,7 @@ backend/
   providers.py  AI, TTS, ASR
   render.py     FFmpeg, lớp đồ họa, phụ đề, trộn âm
   portrait.py   Bản dọc vẽ tay: nền lưới, người kể, hook, nhạc
+  whiteboard/   Chế độ vẽ tay: engine.py (dựng), regions.py (vùng vẽ), storyboard.py (AI), importer.py (ZIP), worker.py + vendor/ (renderer)
   demo.py       Tạo dự án mẫu trên máy
 frontend/src/   Giao diện React
 frontend/dist/  Giao diện đã build để chạy ngay

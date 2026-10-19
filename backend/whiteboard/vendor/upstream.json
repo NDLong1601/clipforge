@@ -1,0 +1,12 @@
+{
+  "repository": "https://github.com/geeklee/srt-whiteboard-animation",
+  "commit": "696a7243c0e6ffb6827676e539c2ca5ebae2bf6b",
+  "license": "MIT",
+  "vendored": [
+    "scripts",
+    "assets",
+    "LICENSE",
+    "README.md"
+  ],
+  "changes_to_upstream": "none; wrapper replaces VideoWriter only inside render subprocess"
+}

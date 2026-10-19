@@ -28,10 +28,14 @@ from . import diagnostics
 from .errors import safe_message
 from .template_packages import MissingTemplateAssets
 from .models import Project, Asset, Action, Template, Clip, uid, AIApplyRequest, AIApplyCommit, PortraitRequest
+from .models import WhiteboardImagesRequest
 from .project_validation import validate_project
 from .font_manager import available as available_fonts
 from . import sound_effects
 from .template_content import bind_placeholders, infer_product
+from .whiteboard import engine as whiteboard_engine, importer as whiteboard_importer, storyboard
+
+ASSET_ROLES = {"source", "reference", "voice", "music", "overlay", "illustration", "product"}
 
 
 @asynccontextmanager
@@ -220,6 +224,12 @@ def _run_project_job(job):
         render_info = render.render(p, job, bool(payload.get("preview")))
     elif job.kind == "portrait":
         render_info = portrait.render(p, job, payload)
+    elif job.kind == "whiteboard-render":
+        render_info = whiteboard_engine.render(p, job)
+    elif job.kind == "whiteboard-plan":
+        p = storyboard.plan(p, bool(payload.get("use_ai")), job)
+    elif job.kind == "whiteboard-images":
+        p = storyboard.images(p, payload, job)
     elif job.kind == "demo":
         from .demo import build_demo
 
@@ -266,7 +276,7 @@ def _run_upload_job(job):
     if not files or payload.get("upload_incomplete"):
         raise ValueError("Upload chưa nhận đủ file; hãy chọn file để gửi lại.")
     role = payload.get("role", "source")
-    if role not in {"source", "reference", "voice", "music", "overlay"}:
+    if role not in ASSET_ROLES:
         raise ValueError("Loại tư liệu không hợp lệ")
     staged = []
     assets = []
@@ -379,7 +389,8 @@ def _run_upload_job(job):
     return {"project_id": saved.id, "revision": saved.revision, "auto_assemble": auto_assemble}
 
 
-for _kind in ("analyze", "plan", "voice", "assemble-audio", "filter-faces", "transcribe", "template", "render", "portrait", "demo"):
+for _kind in ("analyze", "plan", "voice", "assemble-audio", "filter-faces", "transcribe", "template", "render", "portrait",
+              "whiteboard-render", "whiteboard-plan", "whiteboard-images", "demo"):
     jobs.register_handler(_kind, _run_project_job)
 jobs.register_handler("assistant", _run_assistant_job)
 jobs.register_handler("upload", _run_upload_job)
@@ -737,7 +748,7 @@ async def upload(
         )
     ):
         role = "voice"
-    if role not in ["source", "reference", "voice", "music", "overlay"]:
+    if role not in ASSET_ROLES:
         raise ValueError("Loại tư liệu không hợp lệ")
     if len(files) > 10:
         raise ValueError("Mỗi lần nhập tối đa 10 file")
@@ -895,6 +906,14 @@ def remove_asset(pid: str, aid: str):
             p.voice_id = ""
         if p.music_id == aid:
             p.music_id = ""
+        board = p.whiteboard
+        if board.character_reference_id == aid:
+            board.character_reference_id = ""
+        if board.product_id == aid:
+            board.product_id = ""
+        for scene in board.scenes:
+            if scene.image_id == aid:
+                scene.image_id, scene.crop, scene.layout = "", None, None
         return store.save(p)
 
 
@@ -1139,6 +1158,96 @@ def export_portrait(pid: str, data: PortraitRequest):
             current.model_dump(),
             config_fingerprint=_job_config_fingerprint("portrait"),
         )
+
+
+@app.post("/api/projects/{pid}/whiteboard/render")
+def export_whiteboard(pid: str, action: Action):
+    """Draw every hand-drawn scene and export the whiteboard video."""
+    with jobs.LOCK, store.LOCK:
+        unlocked(pid)
+        current = store.read(pid)
+        if action.revision is not None and action.revision != current.revision:
+            raise HTTPException(409, "Dự án đã đổi. Tải lại dự án trước khi xuất.")
+        try:
+            _, duration = whiteboard_engine._voice(current)
+            whiteboard_engine.timeline(current, duration)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        return jobs.submit(
+            pid,
+            "whiteboard-render",
+            {},
+            current.model_dump(),
+            config_fingerprint=_job_config_fingerprint("whiteboard-render"),
+        )
+
+
+@app.post("/api/projects/{pid}/whiteboard/plan")
+def plan_whiteboard(pid: str, action: Action):
+    return task(pid, "whiteboard-plan", {"use_ai": action.use_ai}, action.revision)
+
+
+@app.post("/api/projects/{pid}/whiteboard/images")
+def whiteboard_images(pid: str, data: WhiteboardImagesRequest):
+    return task(pid, "whiteboard-images", data.model_dump(exclude={"revision"}), data.revision)
+
+
+@app.get("/api/projects/{pid}/whiteboard/scenes/{sid}/preview.png")
+def whiteboard_preview(pid: str, sid: str):
+    image = whiteboard_engine.preview(store.read(pid), sid)
+    buffer = __import__("io").BytesIO()
+    image.save(buffer, "PNG")
+    return Response(buffer.getvalue(), media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/projects/{pid}/whiteboard/import")
+async def import_whiteboard(pid: str, file: UploadFile = File(...), revision: int = Form(...)):
+    """Import a ZIP packaged by the srt-whiteboard-animation-custom kit."""
+    with jobs.LOCK, store.LOCK:
+        unlocked(pid)
+        if store.read(pid).revision != revision:
+            raise HTTPException(409, "Dự án đã đổi. Tải lại dự án trước khi nhập.")
+    staging = store.ROOT / "staging"
+    staging.mkdir(parents=True, exist_ok=True)
+    handle, name = tempfile.mkstemp(suffix=".zip", dir=staging)
+    archive = Path(name)
+    try:
+        with os.fdopen(handle, "wb") as stream:
+            size = 0
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > whiteboard_importer.MAX_BYTES:
+                    raise HTTPException(413, "ZIP vượt 1,5 GB.")
+                stream.write(chunk)
+
+        def build():
+            current = store.read(pid)
+            try:
+                return whiteboard_importer.build(pid, archive, current)
+            except (KeyError, TypeError, IndexError) as exc:
+                raise ValueError(f"project.json thiếu hoặc sai trường: {exc}") from None
+            except __import__("zipfile").BadZipFile:
+                raise ValueError("File tải lên không phải ZIP hợp lệ.") from None
+
+        board, assets, changes, warnings, written = await anyio.to_thread.run_sync(build)
+        try:
+            with jobs.LOCK, store.LOCK:
+                unlocked(pid)
+                current = store.read(pid)
+                if current.revision != revision:
+                    raise HTTPException(409, "Dự án đã đổi trong lúc nhập. Hãy thử lại.")
+                current.assets.extend(assets)
+                for key, value in changes.items():
+                    setattr(current, key, value)
+                current.whiteboard = board
+                current.mode = "whiteboard"
+                current.warnings = warnings
+                return store.save(current)
+        except BaseException:
+            whiteboard_importer.discard(written)
+            raise
+    finally:
+        archive.unlink(missing_ok=True)
 
 
 @app.post("/api/jobs/render-batch")

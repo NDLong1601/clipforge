@@ -1,0 +1,130 @@
+.wb-note {
+  font-size: 10px;
+  line-height: 1.7;
+  color: #d9c48f;
+  background: #2d2a1c;
+  border: 1px solid #5a5131;
+  border-radius: 7px;
+  padding: 8px 10px;
+  margin: 8px 0;
+}
+.wb-reference {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin: 4px 0 8px;
+}
+.wb-reference > img,
+.wb-reference > span {
+  width: 64px;
+  height: 64px;
+  border-radius: 7px;
+  object-fit: cover;
+  flex-shrink: 0;
+  background: #273523;
+  display: grid;
+  place-items: center;
+  color: #7d9570;
+}
+.wb-reference > div {
+  flex: 1;
+  min-width: 0;
+}
+.wb-reference .field {
+  margin: 0 0 7px;
+}
+.wb-scene-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 18px;
+  border-top: 1px solid #33402d;
+  padding-top: 8px;
+}
+.wb-scenes {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.wb-scene {
+  justify-content: flex-start;
+  gap: 9px;
+  padding: 5px;
+  text-align: left;
+  background: #151b13;
+  border-color: #2f3b29;
+}
+.wb-scene.active {
+  border-color: #b5f36d;
+  background: #223020;
+}
+.wb-thumb {
+  width: 52px;
+  height: 36px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: #273523;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  color: #7d9570;
+}
+.wb-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.wb-scene-text {
+  min-width: 0;
+  flex: 1;
+}
+.wb-scene-text b {
+  display: block;
+  font-size: 10px;
+  font-weight: 500;
+  font-family: Consolas, monospace;
+}
+.wb-scene-text small {
+  display: block;
+  font-size: 9px;
+  color: #90a184;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wb-scene em {
+  font-style: normal;
+  font-size: 8px;
+  color: #e6b77a;
+  white-space: nowrap;
+}
+.wb-actions {
+  justify-content: space-between;
+}
+.wb-titles {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 13px 0;
+  font-size: 10px;
+  color: #b1bdb2;
+}
+.wb-titles .ai-toggle {
+  margin: 0;
+  white-space: nowrap;
+}
+.wb-preview {
+  flex-direction: column;
+  gap: 8px;
+}
+.wb-preview img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  box-shadow: 0 12px 45px #0007;
+  min-height: 0;
+}
+.wb-stale {
+  font-size: 9px;
+  color: #d9c48f;
+}

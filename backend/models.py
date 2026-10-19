@@ -51,7 +51,7 @@ class Asset(Model):
     id: str = Field(default_factory=uid)
     name: str
     filename: str
-    role: Literal["source", "reference", "voice", "music", "overlay"] = "source"
+    role: Literal["source", "reference", "voice", "music", "overlay", "illustration", "product"] = "source"
     media: Literal["video", "audio", "image"]
     duration: float = 0
     width: int = 0
@@ -193,6 +193,76 @@ class ProductInfo(Model):
     description: str = Field(default="", max_length=1000)
 
 
+class WBRect(Model):
+    """A rectangle as fractions of the whiteboard canvas (or of an image for crops)."""
+
+    x: float = Field(ge=0, le=1)
+    y: float = Field(ge=0, le=1)
+    w: float = Field(gt=0, le=1)
+    h: float = Field(gt=0, le=1)
+
+    @model_validator(mode="after")
+    def fits(self):
+        if self.x + self.w > 1.000001 or self.y + self.h > 1.000001:
+            raise ValueError("Vùng vẽ vượt khung")
+        return self
+
+
+class WBElement(Model):
+    id: str = Field(default_factory=uid, min_length=1, max_length=64)
+    region: WBRect
+    start_ms: int | None = Field(default=None, ge=0)
+    duration_ms: int | None = Field(default=None, gt=0)
+
+
+class WBLayout(Model):
+    """Hand-placed artwork and drawing order, kept from an imported kit project."""
+
+    aspect: Literal["16:9", "9:16"]
+    image_box: WBRect
+    elements: list[WBElement] = Field(default_factory=list, max_length=24)
+
+
+class WBTitle(Model):
+    text: str = Field(min_length=1, max_length=80)
+    accent: bool = False
+    # Seconds after the scene starts; None spreads titles through the scene.
+    start: float | None = Field(default=None, ge=0, le=180)
+
+
+class WBScene(Model):
+    id: str = Field(default_factory=uid, pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    start: float = Field(ge=0, le=180)
+    end: float = Field(gt=0, le=180)
+    narration: str = Field(default="", max_length=1000)
+    image_id: str = ""
+    crop: WBRect | None = None
+    image_prompt: str = Field(default="", max_length=2000)
+    titles: list[WBTitle] = Field(default_factory=list, max_length=3)
+    has_character: bool = False
+    product: bool = False
+    layout: WBLayout | None = None
+
+    @model_validator(mode="after")
+    def valid_range(self):
+        if self.end <= self.start:
+            raise ValueError("Cảnh vẽ tay phải kết thúc sau khi bắt đầu")
+        return self
+
+
+class Whiteboard(Model):
+    case: Literal["nam", "nu"] = "nam"
+    aspect: Literal["16:9", "9:16"] = "16:9"
+    background: str = Field(default="#F6F1E3", pattern=r"^#[0-9a-fA-F]{6}$")
+    style: str = Field(default="editorial-ink", pattern=r"^[a-z0-9-]{1,40}$")
+    character_description: str = Field(default="", max_length=1500)
+    character_reference_id: str = ""
+    product_id: str = ""
+    music_volume: float = Field(default=0.48, ge=0, le=1)
+    transition_frames: int = Field(default=6, ge=0, le=15)
+    scenes: list[WBScene] = Field(default_factory=list, max_length=80)
+
+
 class Project(Model):
     schema_version: int = 7
     id: str = Field(default_factory=uid)
@@ -201,7 +271,7 @@ class Project(Model):
     # Kept outside undo/redo semantics so interrupted job commits are never replayed.
     job_commit_tokens: list[str] = Field(default_factory=list)
     name: str = Field(default="Video mới", min_length=1, max_length=150)
-    mode: Literal["remix", "template"] = "remix"
+    mode: Literal["remix", "template", "whiteboard"] = "remix"
     script: str = Field(default="", max_length=12000)
     product_name: str = Field(default="", max_length=500)
     product_description: str = Field(default="", max_length=1000)
@@ -232,6 +302,7 @@ class Project(Model):
     source_text_mode: Literal["off", "cover", "blur"] = "cover"
     warnings: list[str] = Field(default_factory=list)
     exports: list[dict] = Field(default_factory=list)
+    whiteboard: Whiteboard = Field(default_factory=Whiteboard)
     updated_at: str = ""
 
 
@@ -264,6 +335,10 @@ class Settings(Model):
     transcription_model: str = "whisper-1"
     local_whisper_model: str = "base"
     language: str = "vi"
+    # Hand-drawn scenes: an OpenAI-compatible Images API route and model.
+    image_profile_id: str = ""
+    image_model: str = Field(default="gpt-image-1", min_length=1, max_length=120)
+    image_quality: Literal["low", "medium", "high"] = "medium"
 
     @model_validator(mode="after")
     def valid_ai_profiles(self):
@@ -290,6 +365,14 @@ class PortraitRequest(Model):
     hook_lines: list[str] = Field(default_factory=list, max_length=3)
     music: bool = True
     playback_rate: Literal[1.0, 1.1, 1.2] = 1.1
+    revision: int | None = Field(default=None, ge=0)
+
+
+class WhiteboardImagesRequest(Model):
+    scene_ids: list[str] = Field(default_factory=list, max_length=80)
+    character: bool = False
+    only_character: bool = False
+    missing_only: bool = True
     revision: int | None = Field(default=None, ge=0)
 
 

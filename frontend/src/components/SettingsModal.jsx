@@ -486,6 +486,42 @@ export function SettingsModal({ settings, onClose, onSave, onTest, onUseEnvironm
               <input value={s.language} onChange={(e) => field('language', e.target.value)} />
             </Field>
           </div>
+          <h3>Tranh vẽ tay bằng AI</h3>
+          <p className="helper">
+            Dùng Images API của OpenAI hoặc API tương thích. Cảnh có nhân vật được vẽ từ ảnh nhân
+            vật khóa để giữ cùng gương mặt và nét vẽ.
+          </p>
+          <Field label="Cấu hình API tạo ảnh">
+            <select
+              value={profiles.some((x) => x.id === s.image_profile_id) ? s.image_profile_id : ''}
+              onChange={(e) => field('image_profile_id', e.target.value)}
+            >
+              <option value="">Tự chọn (OpenAI / tương thích đang bật)</option>
+              {profiles.map((x) => (
+                <option key={x.id} value={x.id}>
+                  {x.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <div className="grid-two">
+            <Field label="Model tạo ảnh">
+              <input
+                value={s.image_model || ''}
+                onChange={(e) => field('image_model', e.target.value)}
+              />
+            </Field>
+            <Field label="Chất lượng">
+              <select
+                value={s.image_quality || 'medium'}
+                onChange={(e) => field('image_quality', e.target.value)}
+              >
+                <option value="low">Thấp · nhanh, rẻ</option>
+                <option value="medium">Vừa</option>
+                <option value="high">Cao</option>
+              </select>
+            </Field>
+          </div>
         </div>
         <div className="modal-footer">
           <Button onClick={onClose}>Đóng</Button>

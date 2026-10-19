@@ -34,7 +34,7 @@ def config_identity(kind, settings=None):
         'id': item.id, 'provider': item.provider, 'model': item.model,
         'endpoint_id': endpoint_id(providers.ai_endpoint(item)), 'enabled': item.enabled,
     } for item in settings.ai_profiles]
-    if kind in {'analyze', 'plan', 'template', 'assistant', 'assemble-audio', 'transcribe'}:
+    if kind in {'analyze', 'plan', 'template', 'assistant', 'assemble-audio', 'transcribe', 'whiteboard-plan'}:
         config['ai'] = {'active_profile_id': settings.active_ai_profile_id,
             'auto_fallback': settings.ai_auto_fallback, 'profiles': profiles,
             'legacy_endpoint_id': endpoint_id(settings.ai_base_url), 'legacy_model': settings.ai_model,
@@ -64,7 +64,14 @@ def config_identity(kind, settings=None):
     if kind == 'portrait':
         from . import portrait
         config['portrait_version'] = portrait.VERSION
-    if kind in ('render', 'portrait'):
+    if kind == 'whiteboard-images':
+        config['images'] = {'profile_id': settings.image_profile_id, 'model': settings.image_model,
+            'quality': settings.image_quality, 'active_profile_id': settings.active_ai_profile_id,
+            'profiles': profiles, 'version': 'whiteboard-images-v1'}
+    if kind in ('whiteboard-plan', 'whiteboard-images', 'whiteboard-render'):
+        from .whiteboard import engine
+        config['whiteboard_version'] = engine.VERSION
+    if kind in ('render', 'portrait', 'whiteboard-render'):
         binary = Path(media.ffmpeg()).resolve()
         stat = binary.stat()
         config['renderer'] = {'version': render.RENDER_VERSION,
@@ -80,7 +87,7 @@ def config_fingerprint(kind, settings=None):
 def validate_revision(job):
     # Rendering a saved snapshot publishes an export onto the latest project;
     # operations changing project content must still target the submitted revision.
-    if job.kind in ('render', 'portrait') or job.input_revision is None or not job.snapshot_ref:
+    if job.kind in ('render', 'portrait', 'whiteboard-render') or job.input_revision is None or not job.snapshot_ref:
         return
     with store.LOCK:
         if store.read(job.pid).revision != job.input_revision:

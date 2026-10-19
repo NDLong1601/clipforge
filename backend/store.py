@@ -684,7 +684,7 @@ def projects():
                     "mode": project.mode,
                     "revision": project.revision,
                     "updated_at": project.updated_at,
-                    "clips": len(project.clips),
+                    "clips": len(project.whiteboard.scenes if project.mode == "whiteboard" else project.clips),
                     "corrupt": False,
                     "recovery_available": False,
                 }

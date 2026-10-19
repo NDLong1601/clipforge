@@ -38,7 +38,7 @@ _LOW_RESOURCE_MODE = False
 _GLOBAL_MAINTENANCE = False
 _SHUTTING_DOWN = False
 # Kinds that publish a new entry into project.exports from exports/<job id>.
-EXPORT_KINDS = {"render", "portrait"}
+EXPORT_KINDS = {"render", "portrait", "whiteboard-render"}
 _RESUMABLE_KINDS = {"render", "analyze", "plan", "template", "filter-faces", "assemble-audio", "voice", "transcribe", "upload"}
 _ACTIVE_RESOURCE_USE: dict[str, int] = {}
 _ACTIVE_RAM_BYTES = 0
@@ -60,6 +60,9 @@ _RESOURCE_LIMITS = {
 _RESOURCE_PROFILES = {
     "render": ({"cpu_heavy": 1, "gpu_encode": 1, "heavy_slots": 1}, 2 * 1024**3, 1024**3),
     "portrait": ({"cpu_heavy": 1, "gpu_encode": 1, "heavy_slots": 1}, 2 * 1024**3, 1024**3),
+    "whiteboard-render": ({"cpu_heavy": 1, "heavy_slots": 1}, 3 * 1024**3, 1024**3),
+    "whiteboard-plan": ({}, 512 * 1024**2, 64 * 1024**2),
+    "whiteboard-images": ({"network_ai": 1}, 768 * 1024**2, 512 * 1024**2),
     "analyze": ({"cpu_heavy": 1, "analysis_heavy": 1, "heavy_slots": 1}, 1024**3, 256 * 1024**2),
     "filter-faces": ({"cpu_heavy": 1, "analysis_heavy": 1, "heavy_slots": 1}, 1024**3, 256 * 1024**2),
     "transcribe": ({"cpu_heavy": 1, "analysis_heavy": 1, "network_ai": 1, "heavy_slots": 1}, 1024**3, 256 * 1024**2),
@@ -75,7 +78,7 @@ _RESOURCE_PROFILES = {
 def _resource_profile(kind, payload=None):
     request, ram_bytes, disk_bytes = _RESOURCE_PROFILES.get(kind, ({}, 256 * 1024**2, 0))
     request = dict(request)
-    if kind in {"analyze", "plan", "template"} and (payload or {}).get("use_ai"):
+    if kind in {"analyze", "plan", "template", "whiteboard-plan"} and (payload or {}).get("use_ai"):
         request["network_ai"] = 1
     return tuple(request), request, ram_bytes, disk_bytes
 

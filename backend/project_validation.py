@@ -109,6 +109,28 @@ def validate_project(project: Project) -> Project:
         ):
             raise ValueError(f"music_id: phải trỏ tới tư liệu nhạc có audio")
 
+    board = project.whiteboard
+    for field in ("character_reference_id", "product_id"):
+        asset_id = getattr(board, field)
+        if asset_id and linked_asset(asset_id, f"whiteboard.{field}").media != "image":
+            raise ValueError(f"whiteboard.{field}: phải trỏ tới tư liệu hình ảnh")
+    scene_ids = set()
+    previous_start = -1.0
+    for index, scene in enumerate(board.scenes):
+        where = f"whiteboard.scenes[{index}] ({scene.id})"
+        if scene.id in scene_ids:
+            raise ValueError(f"{where}.id: ID cảnh vẽ tay bị trùng")
+        scene_ids.add(scene.id)
+        if scene.start < previous_start:
+            raise ValueError(f"{where}.start: cảnh vẽ tay không đúng thứ tự thời gian")
+        previous_start = scene.start
+        if scene.image_id and linked_asset(scene.image_id, f"{where}.image_id").media != "image":
+            raise ValueError(f"{where}.image_id: tranh của cảnh phải là ảnh")
+        if scene.layout:
+            ids = [element.id for element in scene.layout.elements]
+            if len(ids) != len(set(ids)):
+                raise ValueError(f"{where}.layout: ID vùng vẽ bị trùng")
+
     validate_layers(project.template.layers, "template.layers")
     for index, layers in enumerate(project.template.slot_layers):
         validate_layers(layers, f"template.slot_layers[{index}]")

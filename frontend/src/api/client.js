@@ -123,4 +123,6 @@ export const roleNames = {
   voice: 'Giọng đọc',
   music: 'Nhạc nền',
   overlay: 'Logo / biểu tượng',
+  illustration: 'Tranh vẽ tay',
+  product: 'Ảnh sản phẩm',
 };

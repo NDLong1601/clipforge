@@ -1,6 +1,8 @@
 import { useEffect, useRef } from 'react';
 import { api } from '../api/client.js';
 
+export const EXPORT_KINDS = ['render', 'portrait', 'whiteboard-render'];
+
 export function terminalKey(job) {
   // Legacy records have no attempt. Progress/state_version is not an event ID.
   return `${job.pid}:${job.id}:${job.attempt || 1}:${job.status}`;
@@ -68,7 +70,7 @@ export function useJobEvents(options) {
             if (!valid()) return;
             latest.current.onAutoAssemble(nextJob);
           }
-          if (job.kind === 'render' || job.kind === 'portrait') {
+          if (EXPORT_KINDS.includes(job.kind)) {
             const exportId = job.result?.export_id || job.result?.id || job.id;
             const exported = updated.exports?.find((item) => item.id === exportId);
             if (!exported) return; // A delayed project response must not consume the event.
@@ -101,7 +103,7 @@ export function useJobEvents(options) {
       if (job.status === 'done') {
         if (job.kind === 'upload' && job.result?.auto_assemble) continue;
         if (
-          (job.kind === 'render' || job.kind === 'portrait') &&
+          EXPORT_KINDS.includes(job.kind) &&
           !project.exports?.some(
             (item) => item.id === (job.result?.export_id || job.result?.id || job.id),
           )

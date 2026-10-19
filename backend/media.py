@@ -177,9 +177,9 @@ def probe(path):
 
 def thumbnail(path, dest, seconds=0, job=None):
     dest.parent.mkdir(parents=True, exist_ok=True)
+    # "-ss 0" makes FFmpeg skip the only frame of a JPEG, so seek only into videos.
     args = [
-        "-ss",
-        str(max(0, seconds)),
+        *(["-ss", str(seconds)] if seconds > 0 else []),
         "-i",
         path,
         "-frames:v",
@@ -201,6 +201,8 @@ def register(pid, path, name, role, job=None, thumbnail_dir=None):
         raise ValueError("Video mẫu phải là file video")
     if role == "overlay" and info["media"] != "image":
         raise ValueError("Biểu tượng/logo cần là PNG, JPG hoặc WEBP")
+    if role in ("illustration", "product") and info["media"] != "image":
+        raise ValueError("Tranh vẽ tay và ảnh sản phẩm cần là PNG, JPG hoặc WEBP")
     if role == "source" and info["media"] == "audio":
         raise ValueError("Chọn vai trò Giọng đọc hoặc Nhạc nền cho file âm thanh")
     if role == "voice" and info["duration"] > 180:

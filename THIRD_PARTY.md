@@ -13,3 +13,5 @@ Mô hình, giấy phép và commit/SHA-256 nguồn được lưu trong `backend/
 Nguồn: https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet.
 
 Bản dọc vẽ tay (`backend/portrait.py`) chuyển từ bước presentation của bộ srt-whiteboard-animation-custom của người dùng. Nền lưới, nhạc Relaxed và hai sprite người kể trong `backend/assets/portrait/` lấy từ bộ đó; prompt tạo sprite lưu cùng tệp provenance. Cần xác nhận quyền sử dụng nhạc Relaxed trước khi phân phối công khai.
+
+Chế độ vẽ tay (`backend/whiteboard/`) dùng renderer srt-whiteboard-animation của geeklee (MIT, commit 696a724), chép nguyên trong `backend/whiteboard/vendor/` cùng LICENSE và upstream.json; chỉ phần ghi video được thay bằng ống FFmpeg khi chạy. Ảnh bàn tay `backend/assets/whiteboard/hand.png` và các preset nét vẽ lấy từ bộ srt-whiteboard-animation-custom của người dùng.

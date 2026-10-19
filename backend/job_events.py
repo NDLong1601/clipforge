@@ -14,7 +14,8 @@ _LOCK = threading.RLock()
 _EVENTS = {"step_started", "failed", "resource_stopped", "cpu_fallback", "completed"}
 _STEPS = {"render", "analyze", "plan", "template", "filter-faces", "assemble-audio",
           "voice", "transcribe", "upload", "assistant", "ffmpeg", "preflight", "commit",
-          "join-video", "source-audio", "subtitles", "mix-audio", "encode-video", "mux"}
+          "join-video", "source-audio", "subtitles", "mix-audio", "encode-video", "mux",
+          "prepare-scenes", "draw-scenes", "storyboard", "generate-images"}
 
 
 def step_token(value):

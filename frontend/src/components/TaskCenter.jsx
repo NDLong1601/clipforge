@@ -38,6 +38,9 @@ const STATUS = {
 const KIND = {
   render: 'Xuất video',
   portrait: 'Xuất bản dọc vẽ tay',
+  'whiteboard-render': 'Xuất video vẽ tay',
+  'whiteboard-plan': 'Lập storyboard vẽ tay',
+  'whiteboard-images': 'Vẽ tranh AI',
   analyze: 'Phân tích tư liệu',
   plan: 'Lập timeline',
   template: 'Dựng theo mẫu',
