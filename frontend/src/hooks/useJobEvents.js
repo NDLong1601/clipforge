@@ -68,7 +68,7 @@ export function useJobEvents(options) {
             if (!valid()) return;
             latest.current.onAutoAssemble(nextJob);
           }
-          if (job.kind === 'render') {
+          if (job.kind === 'render' || job.kind === 'portrait') {
             const exportId = job.result?.export_id || job.result?.id || job.id;
             const exported = updated.exports?.find((item) => item.id === exportId);
             if (!exported) return; // A delayed project response must not consume the event.
@@ -101,7 +101,7 @@ export function useJobEvents(options) {
       if (job.status === 'done') {
         if (job.kind === 'upload' && job.result?.auto_assemble) continue;
         if (
-          job.kind === 'render' &&
+          (job.kind === 'render' || job.kind === 'portrait') &&
           !project.exports?.some(
             (item) => item.id === (job.result?.export_id || job.result?.id || job.id),
           )

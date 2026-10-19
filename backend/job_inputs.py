@@ -61,7 +61,10 @@ def config_identity(kind, settings=None):
         config['face_version'] = face_filter.VERSION
     if kind in {'plan', 'assemble-audio'}:
         config['planner_version'] = 'planner-v1'
-    if kind == 'render':
+    if kind == 'portrait':
+        from . import portrait
+        config['portrait_version'] = portrait.VERSION
+    if kind in ('render', 'portrait'):
         binary = Path(media.ffmpeg()).resolve()
         stat = binary.stat()
         config['renderer'] = {'version': render.RENDER_VERSION,
@@ -77,7 +80,7 @@ def config_fingerprint(kind, settings=None):
 def validate_revision(job):
     # Rendering a saved snapshot publishes an export onto the latest project;
     # operations changing project content must still target the submitted revision.
-    if job.kind == 'render' or job.input_revision is None or not job.snapshot_ref:
+    if job.kind in ('render', 'portrait') or job.input_revision is None or not job.snapshot_ref:
         return
     with store.LOCK:
         if store.read(job.pid).revision != job.input_revision:

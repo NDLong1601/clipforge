@@ -23,6 +23,7 @@ import {
   Save,
   Scissors,
   SlidersHorizontal,
+  Smartphone,
   Sparkles,
   Undo2,
   Upload,
@@ -40,6 +41,7 @@ import {
   TemplatePanel,
 } from './components/EditorPanels.jsx';
 import { StoragePanel, TemplateLibrary } from './components/ManagementPanels.jsx';
+import { PortraitModal } from './components/PortraitModal.jsx';
 import { Preview } from './components/Preview.jsx';
 import { SettingsModal } from './components/SettingsModal.jsx';
 import { TaskCenter } from './components/TaskCenter.jsx';
@@ -91,6 +93,7 @@ export default function App() {
     [backupExports, setBackupExports] = useState(false),
     [backupHistory, setBackupHistory] = useState(false),
     [showSettings, setShowSettings] = useState(false),
+    [portraitSource, setPortraitSource] = useState(null),
     [showProjects, setShowProjects] = useState(true),
     [uploadState, setUploadState] = useState(null),
     [history, setHistory] = useState({ can_undo: false, can_redo: false }),
@@ -335,6 +338,7 @@ export default function App() {
             voice: 'tạo giọng',
             template: 'phân tích mẫu',
             render: 'xuất video',
+            portrait: 'xuất bản dọc vẽ tay',
             transcribe: 'căn phụ đề',
             demo: 'dự án mẫu',
             upload: 'nhập tư liệu',
@@ -1242,24 +1246,52 @@ export default function App() {
                                 }}
                               >
                                 <Play size={14} />
-                                {e.preview ? 'Xem thử' : 'Video'} · {e.duration}s
+                                {e.kind === 'portrait'
+                                  ? 'Bản dọc vẽ tay'
+                                  : e.preview
+                                    ? 'Xem thử'
+                                    : 'Video'}{' '}
+                                · {e.duration}s
                               </button>
                               {e.encoder && (
                                 <small>
                                   {e.hardware_encoder ? 'GPU' : 'CPU'} · {e.encoder}
-                                  {' · cache '}
-                                  {e.clip_cache_hits || 0}/
-                                  {(e.clip_cache_hits || 0) + (e.clip_cache_misses || 0)}
-                                  {e.proxies_used ? ` · ${e.proxies_used} proxy` : ''}
+                                  {e.kind === 'portrait' ? (
+                                    ` · ${e.case === 'nu' ? 'Nữ' : 'Nam'} · x${e.playback_rate}`
+                                  ) : (
+                                    <>
+                                      {' · cache '}
+                                      {e.clip_cache_hits || 0}/
+                                      {(e.clip_cache_hits || 0) + (e.clip_cache_misses || 0)}
+                                      {e.proxies_used ? ` · ${e.proxies_used} proxy` : ''}
+                                    </>
+                                  )}
                                 </small>
                               )}
                             </div>
-                            <a href={exportUrl(p, e)} download={`${p.name}.mp4`} title="Tải MP4">
+                            <a
+                              href={exportUrl(p, e)}
+                              download={`${p.name}${e.kind === 'portrait' ? '-ban-doc' : ''}.mp4`}
+                              title="Tải MP4"
+                            >
                               <Download size={15} />
                             </a>
-                            <a href={exportUrl(p, e, 'captions.srt')} title="Tải SRT">
-                              SRT
-                            </a>
+                            {e.kind !== 'portrait' && (
+                              <>
+                                <a href={exportUrl(p, e, 'captions.srt')} title="Tải SRT">
+                                  SRT
+                                </a>
+                                <button
+                                  className="icon-button"
+                                  title="Xuất bản dọc vẽ tay"
+                                  aria-label="Xuất bản dọc vẽ tay"
+                                  disabled={locked}
+                                  onClick={() => setPortraitSource(e)}
+                                >
+                                  <Smartphone size={15} />
+                                </button>
+                              </>
+                            )}
                           </div>
                         ))
                     )}
@@ -1449,6 +1481,21 @@ export default function App() {
           <CheckCircle2 size={17} />
           {toast}
         </div>
+      )}
+      {portraitSource && p && (
+        <PortraitModal
+          project={p}
+          source={portraitSource}
+          onClose={() => setPortraitSource(null)}
+          onSubmit={(body) =>
+            safe(async () => {
+              // The source export is already rendered, so unsaved edits do not affect it.
+              const job = await api(`/projects/${p.id}/portrait`, body);
+              setJobs((old) => [...old, job]);
+              setPortraitSource(null);
+            })
+          }
+        />
       )}
       {showSettings && settings && (
         <SettingsModal

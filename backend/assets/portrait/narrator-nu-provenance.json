@@ -1,0 +1,17 @@
+{
+  "tool": "image_gen built-in",
+  "source_reference": "character-reference.png",
+  "generated_asset": "narrator-sheet.png",
+  "grid": [
+    2,
+    2
+  ],
+  "role_order": [
+    "idle",
+    "talk",
+    "point",
+    "present"
+  ],
+  "scope": "female outer narrator only; do not use as native story hero",
+  "prompt": "Use case: identity-preserve. Asset type: reusable transparent 2x2 animation sprite sheet for a Vietnamese narrated vertical video. Image 1 is the exact identity and outfit reference, not a background reference. Create a single square PNG with true alpha transparent background, with FOUR full-body animation cels in a strict equal 2x2 grid, one character centered in each quadrant. Preserve this SAME young adult chibi woman from the reference: oval warm face, very large dark brown eyes, side-parted dark brown hair tied in a low long wavy side ponytail over the viewer's RIGHT shoulder, small pearl stud earrings, cream ribbed top, short tan cardigan, high-waisted beige trousers with brown belt, white socks, brown loafers. Same identity, facial proportions, hairstyle, outfit, colors, line style and body size in all four cels. Complete hair, fingers and shoes inside each quadrant with at least 7% clear margin on every side. Align the top of the hair and the soles at identical cell-relative heights in all four quadrants; preserve body height from reference. Top left idle: standing, both hands relaxed, friendly closed-mouth smile, looking at viewer. Top right talking: same standing pose, friendly open speaking mouth with small teeth/tongue, right hand in small conversational wave (on viewer's left), looking at viewer. Bottom left pointing: same woman and size, open speaking mouth, left arm (on viewer's right) pointing diagonally up toward the viewer's right as if toward a video inset. Bottom right presenting: closed friendly smile, left arm on viewer's right with open palm presenting to the right. Do not change outfit, eye color, hair, accessories or identity across cels. Clean smooth outlines consistent with reference. No scenery, no floor, no oval floor shadow, no drop shadow, no text, labels, borders, divider lines, checkerboard texture or props. Output must have actual transparent alpha, not a solid color background."
+}

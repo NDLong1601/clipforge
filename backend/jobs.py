@@ -37,6 +37,8 @@ _SCHEDULER_PAUSED = False
 _LOW_RESOURCE_MODE = False
 _GLOBAL_MAINTENANCE = False
 _SHUTTING_DOWN = False
+# Kinds that publish a new entry into project.exports from exports/<job id>.
+EXPORT_KINDS = {"render", "portrait"}
 _RESUMABLE_KINDS = {"render", "analyze", "plan", "template", "filter-faces", "assemble-audio", "voice", "transcribe", "upload"}
 _ACTIVE_RESOURCE_USE: dict[str, int] = {}
 _ACTIVE_RAM_BYTES = 0
@@ -57,6 +59,7 @@ _RESOURCE_LIMITS = {
 }
 _RESOURCE_PROFILES = {
     "render": ({"cpu_heavy": 1, "gpu_encode": 1, "heavy_slots": 1}, 2 * 1024**3, 1024**3),
+    "portrait": ({"cpu_heavy": 1, "gpu_encode": 1, "heavy_slots": 1}, 2 * 1024**3, 1024**3),
     "analyze": ({"cpu_heavy": 1, "analysis_heavy": 1, "heavy_slots": 1}, 1024**3, 256 * 1024**2),
     "filter-faces": ({"cpu_heavy": 1, "analysis_heavy": 1, "heavy_slots": 1}, 1024**3, 256 * 1024**2),
     "transcribe": ({"cpu_heavy": 1, "analysis_heavy": 1, "network_ai": 1, "heavy_slots": 1}, 1024**3, 256 * 1024**2),
@@ -1034,14 +1037,14 @@ def reconcile_commit(job: Job, *, finalize=True):
                 upload_recovery.load(ROOT, job.pid, job.id)
             token = (intent or receipt or {}).get("commit_token") or job.commit_token
             export_dir = ROOT / "projects" / job.pid / "exports" / job.id
-            if token or intent or receipt or job.kind == "render" and export_dir.exists():
+            if token or intent or receipt or job.kind in EXPORT_KINDS and export_dir.exists():
                 recovery_paths.checked_path(ROOT, store.project_dir(job.pid) / "project.json")
                 with store.LOCK:
                     project = store.read(job.pid)
         except (OSError, ValueError, TypeError, KeyError) as exc:
             evidence_error = exc
             token = (intent or receipt or {}).get("commit_token") or job.commit_token
-        published = bool(project and job.kind == "render" and any(item.get("id") == job.id for item in project.exports))
+        published = bool(project and job.kind in EXPORT_KINDS and any(item.get("id") == job.id for item in project.exports))
         if receipt_valid or project and token in project.job_commit_tokens:
             state = "committed"
         elif published:
@@ -1399,7 +1402,7 @@ def project_lock(pid: str):
 def busy(pid):
     with LOCK:
         return _SHUTTING_DOWN or _GLOBAL_MAINTENANCE or pid in _MAINTENANCE or any(
-            job.pid == pid and job.kind != "render"
+            job.pid == pid and job.kind not in EXPORT_KINDS
             and job.status in ("queued", "running", "cancelling")
             for job in JOBS.values()
         )
@@ -1570,7 +1573,7 @@ def _discard_uncommitted_job(job):
         if job.kind == "upload":
             from . import upload_recovery
             upload_recovery.restore(ROOT, job.pid, job.id, discard=True)
-        if job.kind == "render":
+        if job.kind in EXPORT_KINDS:
             recovery_paths.remove_tree(ROOT, ROOT / "projects" / job.pid / "exports" / job.id)
             recovery_paths.unlink(ROOT, ROOT / "job_runs" / job.id / "render-manifest.json")
         recovery_paths.unlink(ROOT, job_store.pipeline_path(ROOT, job.id))
